@@ -86,7 +86,6 @@ class BookingService:
         if not tour:
             raise ValueError("Тур не знайдено")
 
-        # ЗАХИСТ ВІД ОВЕРБУКІНГУ: перевіряємо вільні місця безпосередньо перед створенням чеку
         booked_seats = await self._booking_repo.get_booked_seats_count(tour_id)
         real_left = max(0, tour.max_seats - booked_seats)
         if tickets_count > real_left:
@@ -124,11 +123,9 @@ class BookingService:
         if not booking:
             return False
 
-        # Ідемпотентність: якщо вже підтверджено раніше, нічого не робимо
         if booking.status == BookingStatus.CONFIRMED:
             return True
 
-        # Успішні статуси LiqPay (success — бойовий, sandbox — тестовий режим)
         if result.status in ("success", "sandbox"):
             updated_booking = await self._booking_repo.update_status(
                 booking_id=booking.id,
