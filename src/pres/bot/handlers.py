@@ -42,6 +42,22 @@ async def cancel_booking(message: Message, state: FSMContext):
     )
 
 
+@router.message(Command("sync_tours"))
+async def cmd_sync_tours(message: Message, tour_service: TourService):
+    if message.from_user.id != settings.admin_chat_id:
+        return
+
+    wait_msg = await message.answer("🔄 Синхронізую розклад із Google Таблицею...")
+    try:
+        from src.inf.sheets.google_sheets import GoogleSheetsService
+        sheets = GoogleSheetsService(settings.google_credentials_path, settings.google_sheet_id)
+        count = await tour_service.sync_from_sheets(sheets)
+        await wait_msg.edit_text(f"✅ Успішно синхронізовано! Актуальних турів у базі: <b>{count}</b>",
+                                     parse_mode="HTML")
+    except Exception as e:
+        await wait_msg.edit_text(f"❌ Помилка синхронізації: {e}")
+
+
 @router.message(F.text == "🏔 Обрати тур")
 async def show_tours(message: Message, tour_service: TourService):
     tours = await tour_service.list_available_tours()
@@ -294,3 +310,4 @@ async def broadcast_chat_link(
     await message.answer(
         f"✅ Посилання на чат успішно розіслано ({sent_count} учасникам)."
     )
+

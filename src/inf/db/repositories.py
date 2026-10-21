@@ -48,6 +48,42 @@ class PostgresTourRepository:
         await self._session.refresh(model)
         return self._to_entity(model)
 
+    async def sync_tours(self, tours: list[TourEntity]) -> int:
+        synced_count = 0
+        for t in tours:
+            stmt = select(TourModel).where(
+                TourModel.title == t.title,
+                TourModel.dates == t.dates
+            )
+            result = await self._session.execute(stmt)
+            existing = result.scalar_one_or_none()
+
+            if existing:
+                existing.price = t.price
+                existing.program_url = t.program_url
+                existing.included_details = t.included_details
+                existing.payment_deadline = t.payment_deadline
+                existing.chat_link = t.chat_link
+                existing.max_seats = t.max_seats
+                existing.is_active = True
+            else:
+                new_tour = TourModel(
+                    title=t.title,
+                    dates=t.dates,
+                    price=t.price,
+                    program_url=t.program_url,
+                    included_details=t.included_details,
+                    payment_deadline=t.payment_deadline,
+                    chat_link=t.chat_link,
+                    max_seats=t.max_seats,
+                    is_active=True,
+                )
+                self._session.add(new_tour)
+            synced_count += 1
+
+        await self._session.commit()
+        return synced_count
+
 
 class PostgresBookingRepository:
     def __init__(self, session: AsyncSession):

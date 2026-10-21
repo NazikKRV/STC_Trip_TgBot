@@ -61,7 +61,6 @@ class PrivatLiqPayGateway:
             decoded_bytes = base64.b64decode(data)
             payload = json.loads(decoded_bytes.decode("utf-8"))
 
-            # order_id має формат "booking_{id}_{timestamp}"
             order_id_str: str = payload.get("order_id", "")
             parts = order_id_str.split("_")
             booking_id = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None

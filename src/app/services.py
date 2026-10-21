@@ -18,8 +18,11 @@ class TourService:
     async def get_tour(self, tour_id: int) -> TourEntity | None:
         return await self._tour_repo.get_by_id(tour_id)
 
+    async def sync_from_sheets(self, sheets_service) -> int:
+        tours = await sheets_service.fetch_tours_from_sheet()
+        return await self._tour_repo.sync_tours(tours)
+
     async def get_remaining_seats(self, tour_id: int) -> int:
-        """Повертає реальну кількість вільних місць у турі."""
         tour = await self._tour_repo.get_by_id(tour_id)
         if not tour or not self._booking_repo:
             return 0
@@ -66,11 +69,13 @@ class BookingService:
         tour_repo: ITourRepository,
         payment_gateway: IPaymentGateway,
         notifier: INotificationService,
+        sheets_service=None,
     ):
         self._booking_repo = booking_repo
         self._tour_repo = tour_repo
         self._payment_gateway = payment_gateway
         self._notifier = notifier
+        self._sheets_service = sheets_service
 
     async def create_booking_with_payment_link(
         self,
@@ -114,39 +119,34 @@ class BookingService:
         return saved_booking, tour, payment_url
 
     async def process_payment_webhook(self, data: str, signature: str) -> bool:
-        """Обробляє callback від ПриватБанку (LiqPay)."""
         result = self._payment_gateway.parse_and_verify_webhook(data, signature)
+
         if not result.is_valid or not result.booking_id:
             return False
 
         booking = await self._booking_repo.get_by_id(result.booking_id)
-        if not booking:
-            return False
-
-        if booking.status == BookingStatus.CONFIRMED:
+        if not booking or booking.status == BookingStatus.CONFIRMED:
             return True
 
         if result.status in ("success", "sandbox"):
             updated_booking = await self._booking_repo.update_status(
-                booking_id=booking.id,
+                booking_id=result.booking_id,
                 status=BookingStatus.CONFIRMED,
                 transaction_id=result.transaction_id,
             )
             tour = await self._tour_repo.get_by_id(booking.tour_id)
+
             if updated_booking and tour:
                 await self._notifier.notify_booking_confirmed(updated_booking, tour)
+
+                if self._sheets_service:
+                    try:
+                        await self._sheets_service.append_paid_booking(tour, updated_booking)
+                    except Exception as e:
+                        print(f"⚠️ Помилка запису в Google Sheets: {e}")
             return True
 
-        elif result.status in ("failure", "error", "reversed"):
-            await self._booking_repo.update_status(
-                booking_id=booking.id,
-                status=BookingStatus.FAILED,
-                transaction_id=result.transaction_id,
-            )
-            await self._notifier.notify_payment_failed(booking)
-            return True
-
-        return True
+        return False
 
     async def get_group_list(self, tour_id: int) -> list[BookingEntity]:
         return await self._booking_repo.get_confirmed_by_tour(tour_id)

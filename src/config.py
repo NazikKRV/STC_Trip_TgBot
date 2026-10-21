@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     public_offer_url: str = "https://cutt.ly/Wtwtl8P7"
     refund_policy_url: str = "https://cutt.ly/KR7c35q"
 
+    google_sheet_id: str
+    google_credentials_path: str = "google_credentials.json"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
 
