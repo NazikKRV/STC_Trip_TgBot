@@ -1,3 +1,4 @@
+import logging
 from src.domain.entities import TourEntity, BookingEntity, BookingStatus
 from src.domain.interfaces import (
     ITourRepository,
@@ -6,9 +7,15 @@ from src.domain.interfaces import (
     INotificationService,
 )
 
+logger = logging.getLogger(__name__)
+
 
 class TourService:
-    def __init__(self, tour_repo: ITourRepository, booking_repo: IBookingRepository | None = None):
+    def __init__(
+        self,
+        tour_repo: ITourRepository,
+        booking_repo: IBookingRepository | None = None,
+    ):
         self._tour_repo = tour_repo
         self._booking_repo = booking_repo
 
@@ -24,9 +31,11 @@ class TourService:
 
     async def get_remaining_seats(self, tour_id: int) -> int:
         tour = await self._tour_repo.get_by_id(tour_id)
-        if not tour or not self._booking_repo:
+        if not tour or not tour.is_active or not self._booking_repo:
             return 0
-        booked = await self._booking_repo.get_booked_seats_count(tour_id)
+        booked = await self._booking_repo.get_booked_seats_count(
+            tour_id, include_pending=True
+        )
         return max(0, tour.max_seats - booked)
 
     def format_marketing_seats_text(self, real_left: int) -> str:
@@ -87,11 +96,14 @@ class BookingService:
         tickets_count: int,
         other_participants: str,
     ) -> tuple[BookingEntity, TourEntity, str]:
-        tour = await self._tour_repo.get_by_id(tour_id)
-        if not tour:
-            raise ValueError("Тур не знайдено")
+        # Блокуємо рядок туру (SELECT ... FOR UPDATE) на час перевірки місць та створення бронювання
+        tour = await self._tour_repo.get_by_id(tour_id, for_update=True)
+        if not tour or not tour.is_active:
+            raise ValueError("Тур не знайдено або він більше не активний")
 
-        booked_seats = await self._booking_repo.get_booked_seats_count(tour_id)
+        booked_seats = await self._booking_repo.get_booked_seats_count(
+            tour_id, include_pending=True
+        )
         real_left = max(0, tour.max_seats - booked_seats)
         if tickets_count > real_left:
             raise ValueError(f"Недостатньо місць. Доступно лише: {real_left}")
@@ -125,28 +137,59 @@ class BookingService:
             return False
 
         booking = await self._booking_repo.get_by_id(result.booking_id)
-        if not booking or booking.status == BookingStatus.CONFIRMED:
+        if not booking:
+            return False
+
+        if booking.status == BookingStatus.CONFIRMED:
             return True
 
         if result.status in ("success", "sandbox"):
+            tour = await self._tour_repo.get_by_id(booking.tour_id, for_update=True)
+            confirmed_before = await self._booking_repo.get_booked_seats_count(
+                booking.tour_id, include_pending=False
+            )
+
             updated_booking = await self._booking_repo.update_status(
                 booking_id=result.booking_id,
                 status=BookingStatus.CONFIRMED,
                 transaction_id=result.transaction_id,
             )
-            tour = await self._tour_repo.get_by_id(booking.tour_id)
 
             if updated_booking and tour:
+                if confirmed_before + updated_booking.tickets_count > tour.max_seats:
+                    await self._notifier.notify_admin_error(
+                        f"Увага! Перевищено ліміт місць (овербукінг) у турі «{tour.title}» "
+                        f"після оплати бронювання #{updated_booking.id} ({updated_booking.full_name}). "
+                        f"Оплачено місць: {confirmed_before + updated_booking.tickets_count} із {tour.max_seats}."
+                    )
+
                 await self._notifier.notify_booking_confirmed(updated_booking, tour)
 
                 if self._sheets_service:
                     try:
-                        await self._sheets_service.append_paid_booking(tour, updated_booking)
+                        await self._sheets_service.append_paid_booking(
+                            tour, updated_booking
+                        )
                     except Exception as e:
-                        print(f"⚠️ Помилка запису в Google Sheets: {e}")
+                        logger.exception("Помилка запису в Google Sheets")
+                        await self._notifier.notify_admin_error(
+                            f"Не вдалося записати бронювання #{updated_booking.id} "
+                            f"({updated_booking.full_name}) у Google Sheets: {e}"
+                        )
             return True
 
-        return False
+        if result.status in ("failure", "error", "reversed", "unsubscribed"):
+            if booking.status != BookingStatus.FAILED:
+                await self._booking_repo.update_status(
+                    booking_id=result.booking_id,
+                    status=BookingStatus.FAILED,
+                    transaction_id=result.transaction_id,
+                )
+                await self._notifier.notify_payment_failed(booking)
+            return True
+
+        # Проміжні статуси LiqPay (processing, 3ds_verify, wait_accept тощо)
+        return True
 
     async def get_group_list(self, tour_id: int) -> list[BookingEntity]:
         return await self._booking_repo.get_confirmed_by_tour(tour_id)

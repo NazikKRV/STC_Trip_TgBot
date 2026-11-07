@@ -3,11 +3,13 @@ import logging
 from contextlib import asynccontextmanager
 from aiogram import Bot, Dispatcher
 from fastapi import FastAPI
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 import uvicorn
 
 from src.config import settings
 from src.inf.db.models import Base
+from src.inf.db.fsm_storage import PostgresFSMStorage
 from src.inf.db.repositories import PostgresTourRepository
 from src.inf.payments.privat_liqpay import PrivatLiqPayGateway
 from src.inf.notifications.telegram_notifier import TelegramNotificationService
@@ -26,13 +28,20 @@ async def lifespan(app: FastAPI):
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.execute(
+            text(
+                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS "
+                "created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
+            )
+        )
 
     async with session_pool() as session:
         tour_service = TourService(PostgresTourRepository(session))
         await tour_service.seed_demo_tour_if_empty()
 
     bot = Bot(token=settings.bot_token)
-    dp = Dispatcher()
+    storage = PostgresFSMStorage(session_pool=session_pool)
+    dp = Dispatcher(storage=storage)
 
     payment_gateway = PrivatLiqPayGateway(
         public_key=settings.liqpay_public_key,

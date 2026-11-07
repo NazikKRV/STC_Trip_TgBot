@@ -1,4 +1,5 @@
-from sqlalchemy import BigInteger, ForeignKey, String, Text, Boolean, Integer
+from datetime import datetime
+from sqlalchemy import BigInteger, ForeignKey, String, Text, Boolean, Integer, DateTime, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -35,3 +36,14 @@ class BookingModel(Base):
     amount: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(50), default="pending")
     transaction_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class FsmStateModel(Base):
+    __tablename__ = "fsm_states"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    state: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    data: Mapped[str] = mapped_column(Text, default="{}")

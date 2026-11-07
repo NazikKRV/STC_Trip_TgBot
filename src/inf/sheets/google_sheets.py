@@ -1,8 +1,21 @@
 import asyncio
+import re
 from datetime import datetime
 import gspread
-from src.config import settings
 from src.domain.entities import TourEntity, BookingEntity
+
+
+def _parse_int(value: object, default: int = 0) -> int:
+    digits = re.sub(r"[^\d]", "", str(value or ""))
+    return int(digits) if digits else default
+
+
+def _sanitize_sheet_title(title: str, dates: str) -> str:
+    raw = f"{title[:30]} ({dates[:15]})"
+    # Заборонені символи у назвах вкладок Google Sheets: [ ] * ? / \ :
+    cleaned = re.sub(r"[\[\]\*\?\/\\:]", "-", raw)
+    cleaned = cleaned.strip().strip("'")
+    return cleaned[:95] or "Тур"
 
 
 class GoogleSheetsService:
@@ -21,19 +34,23 @@ class GoogleSheetsService:
             records = ws.get_all_records()
             tours = []
             for row in records:
-                if not row.get("Назва"):
+                title = str(row.get("Назва") or "").strip()
+                if not title:
+                    continue
+                price = _parse_int(row.get("Ціна"), default=0)
+                if price <= 0:
                     continue
                 tours.append(
                     TourEntity(
                         id=None,
-                        title=str(row["Назва"]).strip(),
-                        dates=str(row["Дати"]).strip(),
-                        price=int(row["Ціна"]),
-                        program_url=str(row["Програма (URL)"]).strip(),
-                        included_details=str(row["Що входить"]).strip(),
-                        payment_deadline=str(row["Дедлайн оплати"]).strip(),
-                        chat_link=str(row["Посилання на чат"]).strip(),
-                        max_seats=int(row.get("Макс місць") or 59),
+                        title=title,
+                        dates=str(row.get("Дати") or "").strip(),
+                        price=price,
+                        program_url=str(row.get("Програма (URL)") or "").strip(),
+                        included_details=str(row.get("Що входить") or "").strip(),
+                        payment_deadline=str(row.get("Дедлайн оплати") or "").strip(),
+                        chat_link=str(row.get("Посилання на чат") or "").strip(),
+                        max_seats=_parse_int(row.get("Макс місць"), default=59),
                         is_active=True,
                     )
                 )
@@ -44,7 +61,7 @@ class GoogleSheetsService:
     async def append_paid_booking(self, tour: TourEntity, booking: BookingEntity) -> None:
         def _sync_append():
             sh = self._get_spreadsheet()
-            sheet_title = f"{tour.title[:30]} ({tour.dates[:15]})".replace("/", "-").replace(":", "-")
+            sheet_title = _sanitize_sheet_title(tour.title, tour.dates)
 
             try:
                 ws = sh.worksheet(sheet_title)
@@ -60,7 +77,7 @@ class GoogleSheetsService:
                     "Інші учасники",
                     "Сума (грн)",
                     "ID транзакції LiqPay",
-                    "Telegram ID"
+                    "Telegram ID",
                 ])
 
             ws.append_row([

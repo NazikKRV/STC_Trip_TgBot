@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 
 
@@ -35,6 +36,7 @@ class BookingEntity:
     amount: int
     status: BookingStatus = BookingStatus.PENDING
     transaction_id: str | None = None
+    created_at: datetime | None = None
 
 
 @dataclass
