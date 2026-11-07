@@ -1,0 +1,193 @@
+import asyncio
+import re
+from datetime import datetime
+import gspread
+from src.domain.entities import (
+    TourEntity,
+    BookingEntity,
+    FaqEntity,
+    PromoCodeEntity,
+)
+
+
+def _parse_int(value: object, default: int = 0) -> int:
+    digits = re.sub(r"[^\d]", "", str(value or ""))
+    return int(digits) if digits else default
+
+
+def _sanitize_sheet_title(title: str, dates: str) -> str:
+    raw = f"{title[:30]} ({dates[:15]})"
+    cleaned = re.sub(r"[\[\]\*\?\/\\:]", "-", raw)
+    cleaned = cleaned.strip().strip("'")
+    return cleaned[:95] or "Тур"
+
+
+class GoogleSheetsService:
+    def __init__(self, credentials_path: str, sheet_id: str):
+        self._credentials_path = credentials_path
+        self._sheet_id = sheet_id
+
+    def _get_spreadsheet(self) -> gspread.Spreadsheet:
+        gc = gspread.service_account(filename=self._credentials_path)
+        return gc.open_by_key(self._sheet_id)
+
+    async def fetch_tours_from_sheet(self) -> list[TourEntity]:
+        def _sync_fetch():
+            sh = self._get_spreadsheet()
+            ws = sh.worksheet("Розклад")
+            records = ws.get_all_records()
+            tours = []
+            for row in records:
+                title = str(row.get("Назва") or "").strip()
+                if not title:
+                    continue
+                price = _parse_int(row.get("Ціна"), default=0)
+                if price <= 0:
+                    continue
+
+                raw_days = (
+                    row.get("Кількість днів")
+                    or row.get("Тривалість (днів)")
+                    or row.get("Днів")
+                )
+                if raw_days:
+                    duration_days = max(1, _parse_int(raw_days, default=1))
+                else:
+                    duration_days = 1
+
+                tours.append(
+                    TourEntity(
+                        id=None,
+                        title=title,
+                        dates=str(row.get("Дати") or "").strip(),
+                        price=price,
+                        program_url=str(row.get("Програма (URL)") or "").strip(),
+                        included_details=str(row.get("Що входить") or "").strip(),
+                        payment_deadline="15 хвилин",
+                        chat_link=str(row.get("Посилання на чат") or "").strip(),
+                        max_seats=_parse_int(row.get("Макс місць"), default=59),
+                        duration_days=duration_days,
+                        is_active=True,
+                    )
+                )
+            return tours
+
+        return await asyncio.to_thread(_sync_fetch)
+
+    async def sync_faqs_with_sheet(
+        self, default_faqs: list[FaqEntity]
+    ) -> list[FaqEntity]:
+        def _sync_faqs():
+            sh = self._get_spreadsheet()
+            try:
+                ws = sh.worksheet("FAQ")
+                records = ws.get_all_records()
+                faqs = []
+                for idx, row in enumerate(records, start=1):
+                    btn = str(row.get("Питання (кнопка)") or "").strip()
+                    ans = str(row.get("Відповідь") or "").strip()
+                    if btn and ans:
+                        faqs.append(
+                            FaqEntity(
+                                id=idx,
+                                button_title=btn,
+                                answer_html=ans,
+                                sort_order=idx,
+                            )
+                        )
+                if faqs:
+                    return faqs
+            except gspread.WorksheetNotFound:
+                ws = sh.add_worksheet(title="FAQ", rows=30, cols=2)
+                rows_to_insert = [["Питання (кнопка)", "Відповідь"]]
+                for f in default_faqs:
+                    rows_to_insert.append([f.button_title, f.answer_html])
+                ws.append_rows(rows_to_insert)
+
+            return default_faqs
+
+        return await asyncio.to_thread(_sync_faqs)
+
+    async def sync_promos_with_sheet(self) -> list[PromoCodeEntity]:
+        def _sync_promos():
+            sh = self._get_spreadsheet()
+            try:
+                ws = sh.worksheet("Промокоди")
+            except gspread.WorksheetNotFound:
+                ws = sh.add_worksheet(title="Промокоди", rows=50, cols=2)
+                ws.append_rows(
+                    [
+                        ["Промокод", "Знижка з особи (грн)"],
+                        ["OLDFRIEND", 50],
+                    ]
+                )
+
+            records = ws.get_all_records()
+            promos = []
+            for row in records:
+                code = str(row.get("Промокод") or "").strip().upper()
+                discount = _parse_int(row.get("Знижка з особи (грн)"), default=0)
+                if code and discount > 0:
+                    promos.append(
+                        PromoCodeEntity(
+                            code=code,
+                            discount_per_person=discount,
+                            is_active=True,
+                        )
+                    )
+            return promos
+
+        return await asyncio.to_thread(_sync_promos)
+
+    async def append_paid_booking(
+        self, tour: TourEntity, booking: BookingEntity
+    ) -> None:
+        def _sync_append():
+            sh = self._get_spreadsheet()
+            sheet_title = _sanitize_sheet_title(tour.title, tour.dates)
+
+            headers = [
+                "ID Бронювання",
+                "Дата оплати",
+                "ПІБ",
+                "Телефон",
+                "Вік",
+                "Кількість місць",
+                "Інші учасники",
+                "Знижки / Пільги (УБД, Діти)",
+                "Нотатка / Побажання",
+                "Сума (грн)",
+                "ID транзакції LiqPay",
+                "Telegram (@нік)",
+            ]
+
+            try:
+                ws = sh.worksheet(sheet_title)
+                existing_headers = ws.row_values(1)
+                if existing_headers != headers:
+                    if ws.col_count < len(headers):
+                        ws.add_cols(len(headers) - ws.col_count)
+                    ws.update("A1:L1", [headers])
+            except gspread.WorksheetNotFound:
+                ws = sh.add_worksheet(title=sheet_title, rows=100, cols=12)
+                ws.append_row(headers)
+
+            tg_nick = f"@{booking.username}" if booking.username else "прихований"
+            ws.append_row(
+                [
+                    booking.id,
+                    datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    booking.full_name,
+                    booking.phone,
+                    booking.age,
+                    booking.tickets_count,
+                    booking.other_participants,
+                    booking.discount_info,
+                    booking.notes,
+                    booking.amount,
+                    booking.transaction_id or "",
+                    tg_nick,
+                ]
+            )
+
+        await asyncio.to_thread(_sync_append)
