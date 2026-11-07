@@ -2,6 +2,11 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 from aiogram import Bot, Dispatcher
+from aiogram.types import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+)
 from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
@@ -10,7 +15,11 @@ import uvicorn
 from src.config import settings
 from src.inf.db.models import Base
 from src.inf.db.fsm_storage import PostgresFSMStorage
-from src.inf.db.repositories import PostgresTourRepository
+from src.inf.db.repositories import (
+    PostgresTourRepository,
+    PostgresFaqRepository,
+    PostgresPromoCodeRepository,
+)
 from src.inf.payments.privat_liqpay import PrivatLiqPayGateway
 from src.inf.notifications.telegram_notifier import TelegramNotificationService
 from src.app.services import TourService
@@ -28,16 +37,23 @@ async def lifespan(app: FastAPI):
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(
-            text(
-                "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS "
-                "created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()"
-            )
-        )
+        migrations = [
+            "ALTER TABLE tours ADD COLUMN IF NOT EXISTS duration_days INTEGER DEFAULT 1",
+            "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()",
+            "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT 'немає'",
+            "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS discount_info TEXT DEFAULT 'немає'",
+            "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS username VARCHAR(100)",
+        ]
+        for sql in migrations:
+            await conn.execute(text(sql))
 
     async with session_pool() as session:
-        tour_service = TourService(PostgresTourRepository(session))
-        await tour_service.seed_demo_tour_if_empty()
+        tour_service = TourService(
+            tour_repo=PostgresTourRepository(session),
+            faq_repo=PostgresFaqRepository(session),
+            promo_repo=PostgresPromoCodeRepository(session),
+        )
+        await tour_service.seed_defaults_if_empty()
 
     bot = Bot(token=settings.bot_token)
     storage = PostgresFSMStorage(session_pool=session_pool)
@@ -63,6 +79,25 @@ async def lifespan(app: FastAPI):
         )
     )
     dp.include_router(bot_router)
+
+    try:
+        await bot.set_my_commands(
+            commands=[
+                BotCommand(command="start", description="🏠 Головне меню (показати кнопки)"),
+            ],
+            scope=BotCommandScopeAllPrivateChats(),
+        )
+        await bot.set_my_commands(
+            commands=[
+                BotCommand(command="admin", description="⚙️ Панель управління турами та групами"),
+                BotCommand(command="sync_tours", description="🔄 Синхронізувати таблицю (Тури, FAQ, Промо)"),
+                BotCommand(command="send_chat_link", description="📨 Розіслати посилання на чат групі"),
+                BotCommand(command="id", description="🆔 Показати ID цього чату"),
+            ],
+            scope=BotCommandScopeAllGroupChats(),
+        )
+    except Exception as e:
+        logging.warning("Не вдалося встановити команди меню бота: %s", e)
 
     polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
     logging.info("Бот STC TRIPS та FastAPI сервер успішно запущені!")

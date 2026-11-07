@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta
 import html
 import logging
 import re
@@ -9,17 +10,27 @@ from aiogram.fsm.context import FSMContext
 
 from src.config import settings
 from src.app.services import TourService, BookingService
-from src.pres.bot.states import BookingForm
+from src.pres.bot.states import (
+    BookingForm,
+    LoyalRequestForm,
+    ManagerCustomPriceForm,
+)
 from src.pres.bot.keyboards import (
     get_main_menu_kb,
+    get_managers_group_kb,
     get_tours_kb,
     get_tour_action_kb,
     get_terms_agreement_kb,
     get_payment_kb,
     get_cancel_kb,
+    get_skip_or_cancel_kb,
     get_phone_kb,
+    get_ubd_children_kb,
     get_faq_menu_kb,
     get_faq_back_kb,
+    get_loyal_request_start_kb,
+    get_loyal_manager_decision_kb,
+    get_large_group_manager_kb,
     get_admin_panel_kb,
     get_admin_tour_kb,
     get_admin_confirm_chat_kb,
@@ -28,7 +39,6 @@ from src.pres.bot.keyboards import (
 logger = logging.getLogger(__name__)
 router = Router()
 
-# Повний список кодів українських мобільних та фіксованих операторів (2 цифри після +380)
 UA_OPERATOR_CODES = {
     "39", "50", "63", "66", "67", "68", "73", "75", "77",
     "89", "91", "92", "93", "94", "95", "96", "97", "98", "99",
@@ -36,87 +46,41 @@ UA_OPERATOR_CODES = {
 
 
 def normalize_phone_number(raw_phone: str) -> str | None:
-    """
-    Приймає телефон у будь-якому зручному форматі:
-    - 097 123 45 67, 098-123-45-67, (067)1234567, 0501234567, 063...
-    - +380971234567, 380971234567, 80971234567
-    - 971234567 (9 цифр без нуля)
-    - Міжнародні номери у форматі +48..., +49... (10-15 цифр)
-    Повертає нормалізований номер у форматі +380XXXXXXXXX (або +XXXXXXXXXXX) чи None.
-    """
     cleaned = re.sub(r"[\s\-\(\)\.]", "", raw_phone.strip())
     has_plus = cleaned.startswith("+")
     digits = re.sub(r"\D", "", cleaned)
 
-    # Українські формати:
     if len(digits) == 12 and digits.startswith("380"):
-        op_code = digits[3:5]
-        if op_code in UA_OPERATOR_CODES:
+        if digits[3:5] in UA_OPERATOR_CODES:
             return f"+{digits}"
     elif len(digits) == 11 and digits.startswith("80"):
-        op_code = digits[2:4]
-        if op_code in UA_OPERATOR_CODES:
+        if digits[2:4] in UA_OPERATOR_CODES:
             return f"+3{digits}"
     elif len(digits) == 10 and digits.startswith("0"):
-        op_code = digits[1:3]
-        if op_code in UA_OPERATOR_CODES:
+        if digits[1:3] in UA_OPERATOR_CODES:
             return f"+38{digits}"
     elif len(digits) == 9 and not has_plus:
-        op_code = digits[0:2]
-        if op_code in UA_OPERATOR_CODES:
+        if digits[0:2] in UA_OPERATOR_CODES:
             return f"+380{digits}"
 
-    # Підтримка міжнародних номерів (якщо клієнт із закордонною SIM-картою, напр. +48...)
     if has_plus and 10 <= len(digits) <= 15 and not digits.startswith("380"):
         return f"+{digits}"
 
     return None
 
 
-def is_admin_user(user_id: int | None) -> bool:
-    return user_id is not None and user_id == settings.admin_chat_id
+def is_managers_chat(chat_id: int | None) -> bool:
+    """Перевіряє, чи дія відбувається у робочій групі менеджерів (ADMIN_CHAT_ID)."""
+    return chat_id is not None and chat_id == settings.admin_chat_id
 
 
-FAQ_DATA: dict[str, tuple[str, str]] = {
-    "booking": (
-        "🎟 Як відбувається бронювання та оплата?",
-        "<b>🎟 Як відбувається бронювання та оплата?</b>\n\n"
-        "1. Ви обираєте бажаний тур у меню <b>«🏔 Обрати тур»</b>.\n"
-        "2. Заповнюєте коротку анкету (ПІБ, телефон, вік та кількість місць).\n"
-        "3. Бот генерує персональне посилання на безпечну оплату через <b>ПриватБанк (LiqPay)</b> (підтримується Apple Pay, Google Pay та оплата карткою будь-якого банку).\n"
-        "4. Одразу після оплати місце закріплюється за вами автоматично, а квиток надходить у цей чат ❤️",
-    ),
-    "group": (
-        "👥 Як забронювати місця для компанії/друзів?",
-        "<b>👥 Як забронювати місця для компанії або друзів?</b>\n\n"
-        "Під час заповнення анкети бот запитає: <i>«Скільки всього місць ви хочете забронювати?»</i>.\n\n"
-        "Просто введіть потрібну цифру (наприклад, 2, 3 або більше) та одним повідомленням вкажіть ПІБ і вік ваших друзів. Ви зможете оплатити всі квитки одним платежем.",
-    ),
-    "refund": (
-        "🔄 Що робити, якщо плани змінилися (Повернення)?",
-        "<b>🔄 Що робити, якщо плани змінилися?</b>\n\n"
-        "Ми розуміємо, що обставини бувають різними. Умови повернення коштів залежать від того, за скільки днів до виїзду ви повідомляєте про скасування, оскільки ми заздалегідь бронюємо транспорт та супутні послуги.\n\n"
-        f"📄 Детальні правила прописані у документі: <a href='{settings.refund_policy_url}'>Умови повернення коштів</a>.\n"
-        f"Для оформлення повернення або заміни учасника напишіть нашому менеджеру: @{settings.manager_username}",
-    ),
-    "chat": (
-        "🚌 Коли я отримаю посилання на чат туру?",
-        "<b>🚌 Коли я отримаю посилання на організаційний чат?</b>\n\n"
-        "Напередодні виїзду ми формуємо спільний Telegram-чат для всіх учасників конкретного туру та тімлідера.\n\n"
-        "Бот автоматично надішле вам запрошення в особисті повідомлення, де буде вся детальна інформація: точний час, геолокація місця збору, контакти супроводжуючого та відповіді на організаційні питання.",
-    ),
-    "items": (
-        "🎒 Що взяти з собою в поїздку?",
-        "<b>🎒 Що варто взяти з собою в тур?</b>\n\n"
-        "• Паспорт або документи у застосунку «Дія»;\n"
-        "• Зручне взуття (особливо для гірських маршрутів) та одяг по погоді;\n"
-        "• Дощовик та змінний комплект речей про всяк випадок;\n"
-        "• Перекус у дорогу, воду та термос із теплим чаєм;\n"
-        "• Павербанк для телефону та індивідуальну аптечку;\n"
-        "• Готівку на особисті витрати (сувеніри, колиби, вхідні квитки).\n\n"
-        "<i>Точний список рекомендацій під конкретний маршрут завжди вказаний у детальній програмі туру!</i>",
-    ),
-}
+def format_manager_name(user) -> str:
+    if not user:
+        return "Менеджер"
+    if user.username:
+        return f"@{html.escape(user.username)}"
+    return html.escape(user.full_name or "Менеджер")
+
 
 FAQ_MAIN_TEXT = (
     "📌 <b>Корисна інформація та Поширені питання (FAQ)</b>\n\n"
@@ -126,54 +90,86 @@ FAQ_MAIN_TEXT = (
 )
 
 
-@router.message(CommandStart(), StateFilter("*"))
-async def cmd_start(message: Message, state: FSMContext):
-    await state.clear()
-    user_id = message.from_user.id if message.from_user else None
-    first_name = message.from_user.first_name if message.from_user else "Друже"
+# ==================== ДОПОМІЖНА КОМАНДА /id ====================
+
+
+@router.message(Command("id"), StateFilter("*"))
+async def cmd_get_id(message: Message):
+    user_id = message.from_user.id if message.from_user else "unknown"
     await message.answer(
-        f"{first_name}, привіт, раді бачити ❤️\n\n"
-        "Обирай актуальний тур у меню нижче та бронюй місце онлайн без черг!",
-        reply_markup=get_main_menu_kb(is_admin=is_admin_user(user_id)),
+        f"🆔 <b>ID цього чату (для ADMIN_CHAT_ID в .env):</b> <code>{message.chat.id}</code>\n"
+        f"👤 <b>Ваш особистий ID:</b> <code>{user_id}</code>",
+        parse_mode="HTML",
     )
 
 
-# ==================== АДМІН-ПАНЕЛЬ ТА КОМАНДИ ====================
+# ==================== РОБОЧА ГРУПА МЕНЕДЖЕРІВ (АДМІН-ФУНКЦІОНАЛ) ====================
 
 
 @router.message(Command("admin"), StateFilter("*"))
-@router.message(F.text == "⚙️ Адмін-панель", StateFilter("*"))
+@router.message(F.text == "⚙️ Панель управління", StateFilter("*"))
 async def show_admin_panel(
     message: Message, state: FSMContext, tour_service: TourService
 ):
-    user_id = message.from_user.id if message.from_user else None
-    if not is_admin_user(user_id):
-        await message.answer("⛔ Доступ лише для адміністратора.")
+    if not is_managers_chat(message.chat.id):
+        await message.answer(
+            "⛔ Команда /admin працює лише у робочій групі менеджерів.\n"
+            f"(ID цього чату: <code>{message.chat.id}</code>)",
+            parse_mode="HTML",
+        )
         return
 
     await state.clear()
     tours = await tour_service.list_available_tours()
     text = (
-        "⚙️ <b>Адмін-панель STC TRIPS</b>\n\n"
-        "Оберіть тур зі списку нижче, щоб переглянути список оплачених учасників "
-        "або розіслати групі посилання на організаційний чат:"
+        "⚙️ <b>Панель управління STC TRIPS (Група менеджерів)</b>\n\n"
+        "• Команда <code>/add_promo КОД СУМА</code> — швидко створити промокод (напр. <code>/add_promo SUMMER 100</code>)\n"
+        "• Оберіть тур нижче для перегляду списку учасників або розсилки чату:"
     )
     await message.answer(
         text,
+        parse_mode="HTML",
+        reply_markup=get_managers_group_kb(),
+    )
+    await message.answer(
+        "👇 <b>Активні тури та дії:</b>",
         parse_mode="HTML",
         reply_markup=get_admin_panel_kb(tours),
     )
 
 
+@router.message(Command("add_promo"), StateFilter("*"))
+async def cmd_add_promo(message: Message, booking_service: BookingService):
+    if not is_managers_chat(message.chat.id):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 3 or not parts[2].isdigit():
+        await message.answer(
+            "Використання: <code>/add_promo КОД СУМА_З_ОСОБИ</code>\n"
+            "Приклад: <code>/add_promo OLDFRIEND 50</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    code = parts[1].strip().upper()
+    discount = int(parts[2])
+    await booking_service.upsert_promo_code(code, discount)
+    await message.answer(
+        f"✅ Промокод <code>{html.escape(code)}</code> на знижку <b>-{discount} грн/ос</b> успішно збережено!",
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data == "admin:main")
 async def admin_main_callback(callback: CallbackQuery, tour_service: TourService):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("⛔ Доступ заборонено", show_alert=True)
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
         return
 
     tours = await tour_service.list_available_tours()
     text = (
-        "⚙️ <b>Адмін-панель STC TRIPS</b>\n\n"
+        "⚙️ <b>Панель управління STC TRIPS (Група менеджерів)</b>\n\n"
         "Оберіть тур зі списку нижче, щоб переглянути список оплачених учасників "
         "або розіслати групі посилання на організаційний чат:"
     )
@@ -187,28 +183,33 @@ async def admin_main_callback(callback: CallbackQuery, tour_service: TourService
 
 @router.callback_query(F.data == "admin:sync")
 async def admin_sync_callback(callback: CallbackQuery, tour_service: TourService):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("⛔ Доступ заборонено", show_alert=True)
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
         return
 
     await callback.answer("🔄 Синхронізую з Google Таблицею...")
-    await callback.message.edit_text("🔄 Синхронізую розклад із Google Таблицею...")
+    await callback.message.edit_text(
+        "🔄 Синхронізую Розклад, FAQ та Промокоди з Google Таблицею..."
+    )
     try:
         from src.inf.sheets.google_sheets import GoogleSheetsService
 
         sheets = GoogleSheetsService(
             settings.google_credentials_path, settings.google_sheet_id
         )
-        count = await tour_service.sync_from_sheets(sheets)
+        tours_cnt, faqs_cnt, promos_cnt = await tour_service.sync_from_sheets(sheets)
         tours = await tour_service.list_available_tours()
         await callback.message.edit_text(
-            f"✅ <b>Успішно синхронізовано!</b> Актуальних турів у базі: <b>{count}</b>\n\n"
+            f"✅ <b>Успішно синхронізовано з Google Таблицею!</b>\n"
+            f"🏔 Актуальних турів: <b>{tours_cnt}</b>\n"
+            f"❓ Питань у FAQ: <b>{faqs_cnt}</b>\n"
+            f"🎟 Активних промокодів: <b>{promos_cnt}</b>\n\n"
             "Оберіть тур для управління:",
             parse_mode="HTML",
             reply_markup=get_admin_panel_kb(tours),
         )
     except Exception as e:
-        logger.exception("Помилка синхронізації турів із Google Таблицею")
+        logger.exception("Помилка синхронізації з Google Таблицею")
         tours = await tour_service.list_available_tours()
         await callback.message.edit_text(
             f"❌ Помилка синхронізації: {html.escape(str(e))}",
@@ -223,8 +224,8 @@ async def admin_tour_details(
     tour_service: TourService,
     booking_service: BookingService,
 ):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("⛔ Доступ заборонено", show_alert=True)
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
         return
 
     tour_id = int(callback.data.split(":")[2])
@@ -239,8 +240,8 @@ async def admin_tour_details(
 
     text = (
         f"🏔 <b>Тур #{tour.id}: {html.escape(tour.title)}</b>\n"
-        f"🗓 Дати: {html.escape(tour.dates)}\n"
-        f"💰 Ціна: {tour.price} грн\n"
+        f"🗓 Дати: {html.escape(tour.dates)} ({tour.duration_days} дн.)\n"
+        f"💰 Базова ціна: {tour.price} грн\n"
         f"👥 Оплачено місць: <b>{paid_seats}</b> із {tour.max_seats} (вільно з урахуванням резерву: {real_left})\n"
         f"🧾 Кількість оплачених замовлень: {len(confirmed_bookings)}\n"
         f"💬 Посилання на чат: {html.escape(tour.chat_link)}"
@@ -260,8 +261,8 @@ async def admin_tour_group_list(
     tour_service: TourService,
     booking_service: BookingService,
 ):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("⛔ Доступ заборонено", show_alert=True)
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
         return
 
     tour_id = int(callback.data.split(":")[2])
@@ -283,14 +284,25 @@ async def admin_tour_group_list(
     total_seats = 0
     for idx, b in enumerate(bookings, start=1):
         total_seats += b.tickets_count
+        user_tag = f" (@{html.escape(b.username)})" if b.username else ""
         others_str = (
-            f"\n   └ Інші: {html.escape(b.other_participants)}"
+            f"\n   👥 Інші: {html.escape(b.other_participants)}"
             if b.tickets_count > 1
             else ""
         )
+        disc_str = (
+            f"\n   🏷 Знижка/Пільга: <b>{html.escape(b.discount_info)}</b>"
+            if b.discount_info and b.discount_info != "немає"
+            else ""
+        )
+        note_str = (
+            f"\n   📝 Нотатка: <i>{html.escape(b.notes)}</i>"
+            if b.notes and b.notes != "немає"
+            else ""
+        )
         lines.append(
-            f"{idx}. <b>{html.escape(b.full_name)}</b> ({b.age} р.) — {html.escape(b.phone)} "
-            f"[{b.tickets_count} місц., {b.amount} грн]{others_str}"
+            f"{idx}. <b>{html.escape(b.full_name)}</b>{user_tag} ({b.age} р.) — {html.escape(b.phone)} "
+            f"[{b.tickets_count} місц., {b.amount} грн]{others_str}{disc_str}{note_str}"
         )
 
     lines.append(f"\n<b>Всього оплачено місць: {total_seats} із {tour.max_seats}</b>")
@@ -308,8 +320,8 @@ async def admin_send_chat_confirm(
     tour_service: TourService,
     booking_service: BookingService,
 ):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("⛔ Доступ заборонено", show_alert=True)
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
         return
 
     tour_id = int(callback.data.split(":")[2])
@@ -391,8 +403,8 @@ async def admin_send_chat_run(
     tour_service: TourService,
     booking_service: BookingService,
 ):
-    if not is_admin_user(callback.from_user.id):
-        await callback.answer("⛔ Доступ заборонено", show_alert=True)
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
         return
 
     tour_id = int(callback.data.split(":")[2])
@@ -410,31 +422,35 @@ async def admin_send_chat_run(
 
 
 @router.message(Command("sync_tours"), StateFilter("*"))
+@router.message(F.text == "🔄 Синхронізувати таблицю", StateFilter("*"))
 async def cmd_sync_tours(message: Message, tour_service: TourService):
-    user_id = message.from_user.id if message.from_user else None
-    if not is_admin_user(user_id):
+    if not is_managers_chat(message.chat.id):
         await message.answer(
-            f"⛔ Доступ заборонено.\n"
-            f"Твій ID: <code>{user_id}</code>\n"
-            f"В .env прописано: <code>{settings.admin_chat_id}</code>",
+            f"⛔ Ця команда працює лише в робочій групі менеджерів.\n"
+            f"ID цього чату: <code>{message.chat.id}</code>",
             parse_mode="HTML",
         )
         return
 
-    wait_msg = await message.answer("🔄 Синхронізую розклад із Google Таблицею...")
+    wait_msg = await message.answer(
+        "🔄 Синхронізую Розклад, FAQ та Промокоди з Google Таблицею..."
+    )
     try:
         from src.inf.sheets.google_sheets import GoogleSheetsService
 
         sheets = GoogleSheetsService(
             settings.google_credentials_path, settings.google_sheet_id
         )
-        count = await tour_service.sync_from_sheets(sheets)
+        tours_cnt, faqs_cnt, promos_cnt = await tour_service.sync_from_sheets(sheets)
         await wait_msg.edit_text(
-            f"✅ Успішно синхронізовано! Актуальних турів у базі: <b>{count}</b>",
+            f"✅ <b>Успішно синхронізовано!</b>\n"
+            f"🏔 Актуальних турів: <b>{tours_cnt}</b>\n"
+            f"❓ Питань FAQ: <b>{faqs_cnt}</b>\n"
+            f"🎟 Промокодів: <b>{promos_cnt}</b>",
             parse_mode="HTML",
         )
     except Exception as e:
-        logger.exception("Помилка синхронізації турів із Google Таблицею")
+        logger.exception("Помилка синхронізації з Google Таблицею")
         await wait_msg.edit_text(f"❌ Помилка синхронізації: {e}")
 
 
@@ -445,14 +461,11 @@ async def broadcast_chat_link(
     tour_service: TourService,
     booking_service: BookingService,
 ):
-    """Команда адміна (/send_chat_link або /send_chat_link <id_туру>)."""
-    user_id = message.from_user.id if message.from_user else None
-    if not is_admin_user(user_id):
+    if not is_managers_chat(message.chat.id):
         return
 
     parts = (message.text or "").split()
     if len(parts) < 2 or not parts[1].isdigit():
-        # Якщо адмін не вказав ID — відкриваємо інтерактивний вибір туру кнопками!
         tours = await tour_service.list_available_tours()
         await message.answer(
             "Оберіть тур, для якого потрібно надіслати посилання на чат:",
@@ -467,25 +480,344 @@ async def broadcast_chat_link(
     await message.answer(result_html, parse_mode="HTML")
 
 
+# ==================== ОБРОБКА ЗАПИТІВ МЕНЕДЖЕРАМИ У ГРУПІ ====================
+
+
+@router.callback_query(F.data.startswith("loyal:approve:"))
+async def manager_approve_loyal(
+    callback: CallbackQuery, bot: Bot, booking_service: BookingService
+):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    target_user_id = int(callback.data.split(":")[2])
+    await booking_service.set_loyal_status(
+        telegram_id=target_user_id, is_loyal=True, pending=False
+    )
+    mgr = format_manager_name(callback.from_user)
+
+    await callback.message.edit_text(
+        f"{callback.message.html_text}\n\n"
+        f"✅ <b>Статус постійного клієнта ПІДТВЕРДЖЕНО</b> (опрацював: {mgr})",
+        parse_mode="HTML",
+    )
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "🎉 <b>Вітаємо! Ваш статус постійного клієнта STC TRIPS підтверджено!</b>\n\n"
+                "Тепер під час бронювання турів у боті для вас автоматично діятиме знижка постійного клієнта ❤️"
+            ),
+            parse_mode="HTML",
+        )
+    except Exception:
+        logger.warning("Не вдалося повідомити клієнта %s про статус", target_user_id)
+    await callback.answer("✅ Статус підтверджено!")
+
+
+@router.callback_query(F.data.startswith("loyal:reject:"))
+async def manager_reject_loyal(
+    callback: CallbackQuery, bot: Bot, booking_service: BookingService
+):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    target_user_id = int(callback.data.split(":")[2])
+    await booking_service.set_loyal_status(
+        telegram_id=target_user_id, is_loyal=False, pending=False
+    )
+    mgr = format_manager_name(callback.from_user)
+
+    await callback.message.edit_text(
+        f"{callback.message.html_text}\n\n"
+        f"❌ <b>Запит на статус постійного клієнта ВІДХИЛЕНО</b> (опрацював: {mgr})",
+        parse_mode="HTML",
+    )
+    try:
+        await bot.send_message(
+            chat_id=target_user_id,
+            text=(
+                "ℹ️ На жаль, менеджер не зміг знайти достатню кількість ваших попередніх поїздок для "
+                "статусу постійного клієнта (потрібно 2+ тури).\n"
+                f"Якщо виникла помилка — напишіть менеджеру: @{settings.manager_username}"
+            ),
+        )
+    except Exception:
+        logger.warning("Не вдалося повідомити клієнта %s про відхилення", target_user_id)
+    await callback.answer("Запит відхилено")
+
+
+@router.callback_query(F.data.startswith("mgr_group:price:"))
+async def manager_ask_custom_price(callback: CallbackQuery, state: FSMContext):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    await state.update_data(
+        custom_price_booking_id=booking_id,
+        group_msg_id=callback.message.message_id,
+        group_msg_html=callback.message.html_text,
+    )
+    await state.set_state(ManagerCustomPriceForm.waiting_for_custom_amount)
+    await callback.message.reply(
+        f"💳 Введіть узгоджену загальну суму до сплати (у грн, лише числом) для <b>Бронювання #{booking_id}</b>.\n"
+        "Після введення бот автоматично надішле клієнту посилання на оплату LiqPay:",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(ManagerCustomPriceForm.waiting_for_custom_amount, F.text)
+async def manager_set_custom_price(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    booking_service: BookingService,
+):
+    if not is_managers_chat(message.chat.id):
+        return
+
+    text = message.text.strip()
+    if not text.isdigit() or int(text) <= 0:
+        await message.reply("⚠️ Введіть суму додатним числом (наприклад: 5800):")
+        return
+
+    custom_amount = int(text)
+    data = await state.get_data()
+    booking_id = data["custom_price_booking_id"]
+    group_msg_id = data.get("group_msg_id")
+    group_msg_html = data.get("group_msg_html", "")
+    await state.clear()
+
+    res = await booking_service.set_custom_price_and_get_payment_url(
+        booking_id=booking_id, custom_amount=custom_amount
+    )
+    if not res:
+        await message.reply("❌ Бронювання не знайдено.")
+        return
+
+    booking, tour, payment_url = res
+    mgr = format_manager_name(message.from_user)
+    deadline_str = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+
+    try:
+        await bot.send_message(
+            chat_id=booking.user_telegram_id,
+            text=(
+                f"🎉 <b>Індивідуальний прорахунок для вашої компанії готовий!</b>\n\n"
+                f"🏔 Тур: <b>{html.escape(tour.title)}</b> ({html.escape(tour.dates)})\n"
+                f"👥 Кількість місць: <b>{booking.tickets_count}</b>\n"
+                f"💳 <b>Узгоджена вартість зі знижкою: {booking.amount} грн</b>\n"
+                f"⏳ Бронь місць діє до: <b>{deadline_str}</b> (15 хв на оплату)\n\n"
+                f"Натисніть кнопку нижче для безпечної оплати:"
+            ),
+            parse_mode="HTML",
+            reply_markup=get_payment_kb(payment_url),
+        )
+    except Exception as e:
+        await message.reply(f"⚠️ Не вдалося надіслати посилання клієнту: {e}")
+        return
+
+    if group_msg_id and group_msg_html:
+        try:
+            await bot.edit_message_text(
+                chat_id=message.chat.id,
+                message_id=group_msg_id,
+                text=(
+                    f"{group_msg_html}\n\n"
+                    f"💳 <b>Виставлено рахунок на {custom_amount} грн</b> (менеджер: {mgr}). Очікуємо оплату від клієнта."
+                ),
+                parse_mode="HTML",
+                reply_markup=get_large_group_manager_kb(booking_id),
+            )
+        except Exception:
+            pass
+
+    await message.reply(
+        f"✅ Посилання на оплату <b>{custom_amount} грн</b> успішно надіслано клієнту {html.escape(booking.full_name)}!",
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data.startswith("mgr_group:confirm:"))
+async def manager_confirm_group_booking(
+    callback: CallbackQuery, booking_service: BookingService
+):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    mgr = format_manager_name(callback.from_user)
+    res = await booking_service.confirm_booking_manually(booking_id, mgr)
+    if not res:
+        await callback.answer("Бронювання не знайдено", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"{callback.message.html_text}\n\n"
+        f"✅ <b>Заявку закрито — бронювання підтверджено та додано в таблицю!</b> (опрацював: {mgr})",
+        parse_mode="HTML",
+    )
+    await callback.answer("✅ Бронювання підтверджено!")
+
+
+@router.callback_query(F.data.startswith("mgr_group:cancel:"))
+async def manager_cancel_group_booking(
+    callback: CallbackQuery, bot: Bot, booking_service: BookingService
+):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    mgr = format_manager_name(callback.from_user)
+    updated = await booking_service.cancel_booking_by_manager(booking_id)
+    if not updated:
+        await callback.answer("Бронювання не знайдено", show_alert=True)
+        return
+
+    await callback.message.edit_text(
+        f"{callback.message.html_text}\n\n"
+        f"❌ <b>Заявку скасовано</b> (опрацював: {mgr})",
+        parse_mode="HTML",
+    )
+    try:
+        await bot.send_message(
+            chat_id=updated.user_telegram_id,
+            text=f"ℹ️ Вашу заявку на бронювання #{booking_id} було скасовано.",
+        )
+    except Exception:
+        pass
+    await callback.answer("Заявку скасовано")
+
+
 # ==================== КЛІЄНТСЬКІ ХЕНДЛЕРИ ====================
+
+
+@router.message(CommandStart(), StateFilter("*"))
+async def cmd_start(message: Message, state: FSMContext):
+    await state.clear()
+    first_name = message.from_user.first_name if message.from_user else "Друже"
+    await message.answer(
+        f"{first_name}, привіт, раді бачити ❤️\n\n"
+        "Обирай актуальний тур у меню нижче та бронюй місце онлайн без черг!",
+        reply_markup=get_main_menu_kb(),
+    )
 
 
 @router.message(F.text == "❌ Скасувати", StateFilter("*"))
 async def cancel_booking(message: Message, state: FSMContext):
     current_state = await state.get_state()
-    user_id = message.from_user.id if message.from_user else None
     await state.clear()
 
     if current_state is None:
+        await message.answer("Ви у головному меню.", reply_markup=get_main_menu_kb())
+        return
+
+    await message.answer(
+        "🛑 Дію скасовано. Ви повернулися до головного меню.",
+        reply_markup=get_main_menu_kb(),
+    )
+
+
+@router.message(F.text == "💎 Статус постійного клієнта")
+async def show_loyal_status(message: Message, booking_service: BookingService):
+    user_id = message.from_user.id
+    is_loyal = await booking_service.is_user_loyal(user_id)
+    if is_loyal:
         await message.answer(
-            "Ви у головному меню.",
-            reply_markup=get_main_menu_kb(is_admin=is_admin_user(user_id)),
+            "💎 <b>Ваш статус: Постійний клієнт STC TRIPS ✅</b>\n\n"
+            "При бронюванні турів для вас автоматично діє знижка:\n"
+            "• <b>-50 грн/ос</b> на 1-денні тури\n"
+            "• <b>-150 грн/ос</b> на 2/3-денні тури ❤️",
+            parse_mode="HTML",
+        )
+        return
+
+    user = await booking_service.get_or_update_user(
+        telegram_id=user_id,
+        username=message.from_user.username,
+    )
+    if user and user.loyal_request_pending:
+        await message.answer(
+            "⏳ <b>Ваш запит на отримання статусу постійного клієнта вже на розгляді у менеджера!</b>\n"
+            "Щойно менеджер перевірить інформацію та натисне кнопку підтвердження, бот надішле вам сповіщення ❤️",
+            parse_mode="HTML",
         )
         return
 
     await message.answer(
-        "🛑 Бронювання скасовано. Ви повернулися до головного меню.",
-        reply_markup=get_main_menu_kb(is_admin=is_admin_user(user_id)),
+        "💎 <b>Програма лояльності STC TRIPS</b>\n\n"
+        "Постійним клієнтом автоматично стає кожен турист, який побував із нами у <b>2 і більше турах</b>!\n"
+        "Знижка для постійних клієнтів:\n"
+        "• <b>-50 грн/ос</b> у 1-денних турах\n"
+        "• <b>-150 грн/ос</b> у 2/3-денних турах\n\n"
+        "Якщо ви вже їздили з нами у 2+ тури раніше (до появи цього бота), натисніть кнопку нижче — "
+        "менеджер підтвердить ваш статус, і бот запам'ятає вас назавжди!",
+        parse_mode="HTML",
+        reply_markup=get_loyal_request_start_kb(),
+    )
+
+
+@router.callback_query(F.data == "loyal:start_request")
+async def start_loyal_request(callback: CallbackQuery, state: FSMContext):
+    await state.set_state(LoyalRequestForm.waiting_for_info)
+    await callback.message.answer(
+        "📝 Будь ласка, напишіть одним повідомленням:\n"
+        "1. Ваше <b>ПІБ та номер телефону</b>\n"
+        "2. У яких приблизно турах ви з нами були\n\n"
+        "<i>(Наприклад: Іваненко Іван, 0971234567, був на Боржаві та в Тустані)</i>:",
+        parse_mode="HTML",
+        reply_markup=get_cancel_kb(),
+    )
+    await callback.answer()
+
+
+@router.message(LoyalRequestForm.waiting_for_info, F.text)
+async def process_loyal_request_info(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    booking_service: BookingService,
+):
+    info_text = message.text.strip()
+    if len(info_text) < 5:
+        await message.answer("⚠️ Будь ласка, напишіть трохи детальніше (ПІБ, телефон та тури):")
+        return
+
+    await state.clear()
+    user_id = message.from_user.id
+    username = message.from_user.username
+    await booking_service.get_or_update_user(telegram_id=user_id, username=username)
+    await booking_service.set_loyal_status(
+        telegram_id=user_id, is_loyal=False, pending=True
+    )
+
+    user_tag = f" (@{html.escape(username)})" if username else ""
+    try:
+        await bot.send_message(
+            chat_id=settings.admin_chat_id,
+            text=(
+                f"💎 <b>Запит на статус Постійного клієнта</b>\n\n"
+                f"👤 Користувач: {html.escape(message.from_user.full_name)}{user_tag}\n"
+                f"🆔 Telegram ID: <code>{user_id}</code>\n"
+                f"📄 Повідомлення від клієнта:\n<i>{html.escape(info_text)}</i>"
+            ),
+            parse_mode="HTML",
+            reply_markup=get_loyal_manager_decision_kb(user_id),
+        )
+    except Exception:
+        logger.exception("Не вдалося надіслати запит на лояльність у групу менеджерів")
+
+    await message.answer(
+        "✅ <b>Запит надіслано менеджеру!</b>\n"
+        "Щойно менеджер підтвердить ваш статус, вам прийде сповіщення в цей чат ❤️",
+        parse_mode="HTML",
+        reply_markup=get_main_menu_kb(),
     )
 
 
@@ -499,34 +831,38 @@ async def show_tours(message: Message, tour_service: TourService):
 
 
 @router.message(F.text == "❓ Поширені питання та Умови")
-async def show_faq(message: Message):
+async def show_faq(message: Message, tour_service: TourService):
+    faqs = await tour_service.list_faqs()
     await message.answer(
         FAQ_MAIN_TEXT,
         parse_mode="HTML",
         disable_web_page_preview=True,
-        reply_markup=get_faq_menu_kb(FAQ_DATA),
+        reply_markup=get_faq_menu_kb(faqs),
     )
 
 
 @router.callback_query(F.data.startswith("faq:"))
-async def faq_navigation(callback: CallbackQuery):
+async def faq_navigation(callback: CallbackQuery, tour_service: TourService):
     key = callback.data.split(":")[1]
+    faqs = await tour_service.list_faqs()
 
     if key == "main":
         await callback.message.edit_text(
             FAQ_MAIN_TEXT,
             parse_mode="HTML",
             disable_web_page_preview=True,
-            reply_markup=get_faq_menu_kb(FAQ_DATA),
+            reply_markup=get_faq_menu_kb(faqs),
         )
-    elif key in FAQ_DATA:
-        _, answer_text = FAQ_DATA[key]
-        await callback.message.edit_text(
-            answer_text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-            reply_markup=get_faq_back_kb(),
-        )
+    elif key.isdigit():
+        faq_id = int(key)
+        selected = next((f for f in faqs if f.id == faq_id), None)
+        if selected:
+            await callback.message.edit_text(
+                selected.answer_html,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+                reply_markup=get_faq_back_kb(),
+            )
 
     await callback.answer()
 
@@ -565,6 +901,9 @@ async def tour_details(callback: CallbackQuery, tour_service: TourService):
     await callback.answer()
 
 
+# ==================== АНКЕТА БРОНЮВАННЯ (FSM) ====================
+
+
 @router.callback_query(F.data.startswith("book:"))
 async def start_booking(
     callback: CallbackQuery, state: FSMContext, tour_service: TourService
@@ -578,6 +917,7 @@ async def start_booking(
         )
         return
 
+    await state.clear()
     await state.update_data(tour_id=tour_id)
     await state.set_state(BookingForm.waiting_for_full_name)
 
@@ -645,8 +985,29 @@ async def process_age(message: Message, state: FSMContext):
     await state.set_state(BookingForm.waiting_for_tickets_count)
     await message.answer(
         "🎟 <b>Скільки всього місць ви хочете забронювати?</b>\n"
-        "(Введіть цифру, наприклад: 1 — якщо їдете самі, 2 — якщо вдвох і т.д.)",
+        "(Введіть цифру, наприклад: 1 — якщо їдете самі, 2 — якщо вдвох, 3–5 — знижка для групок, 6+ — індивідуальний прорахунок)",
         parse_mode="HTML",
+    )
+
+
+async def _ask_ubd_children_step(message: Message, state: FSMContext, tickets_count: int):
+    await state.set_state(BookingForm.waiting_for_ubd_children)
+    await message.answer(
+        "👶🪖 <b>Чи є серед вас діти до 10 років або учасники бойових дій (УБД)?</b>\n"
+        "Оберіть кількість таких учасників на клавіатурі нижче (або натисніть «Немає»):",
+        parse_mode="HTML",
+        reply_markup=get_ubd_children_kb(tickets_count),
+    )
+
+
+async def _ask_notes_step(message: Message, state: FSMContext):
+    await state.set_state(BookingForm.waiting_for_notes)
+    await message.answer(
+        "📝 <b>Чи маєте ви додаткові побажання або нотатку до бронювання?</b>\n"
+        "<i>(Наприклад: «мене закачує, посадіть ближче до переду»)</i>\n\n"
+        "Напишіть ваше побажання або натисніть кнопку <b>«⏭ Пропустити»</b>:",
+        parse_mode="HTML",
+        reply_markup=get_skip_or_cancel_kb("⏭ Пропустити"),
     )
 
 
@@ -655,8 +1016,8 @@ async def process_tickets_count(
     message: Message, state: FSMContext, tour_service: TourService
 ):
     text = message.text.strip()
-    if not text.isdigit() or not (1 <= int(text) <= 20):
-        await message.answer("⚠️ Вкажіть цифру від 1 до 20:")
+    if not text.isdigit() or not (1 <= int(text) <= 59):
+        await message.answer("⚠️ Вкажіть коректну кількість місць цифрою:")
         return
 
     tickets_count = int(text)
@@ -675,15 +1036,11 @@ async def process_tickets_count(
 
     if tickets_count == 1:
         await state.update_data(other_participants="немає")
-        await state.set_state(BookingForm.waiting_for_terms_agreement)
-        await message.answer(
-            "Перед переходом до оплати, будь ласка, ознайомтеся та погодьтеся з умовами бронювання:",
-            reply_markup=get_terms_agreement_kb(),
-        )
+        await _ask_ubd_children_step(message, state, tickets_count)
     else:
         await state.set_state(BookingForm.waiting_for_other_participants)
         await message.answer(
-            f"👥 Ви бронюєте {tickets_count} місць.\n\n"
+            f"👥 Ви бронюєте <b>{tickets_count}</b> місць.\n\n"
             f"Будь ласка, вкажіть ПІБ та вік для <b>інших {tickets_count - 1} учасників</b> єдиним повідомленням:",
             parse_mode="HTML",
         )
@@ -697,11 +1054,166 @@ async def process_others(message: Message, state: FSMContext):
         return
 
     await state.update_data(other_participants=text)
+    data = await state.get_data()
+    tickets_count = data["tickets_count"]
+
+    # Якщо 6 і більше осіб — індивідуальний прорахунок менеджером (переходимо одразу до нотатки)
+    if tickets_count >= 6:
+        await _ask_notes_step(message, state)
+    else:
+        await _ask_ubd_children_step(message, state, tickets_count)
+
+
+@router.message(BookingForm.waiting_for_ubd_children, F.text)
+async def process_ubd_children(message: Message, state: FSMContext):
+    text = message.text.strip().lower()
+    data = await state.get_data()
+    tickets_count = data["tickets_count"]
+
+    if text in ("немає", "0", "ні", "нема"):
+        ubd_count = 0
+    elif text.isdigit() and 1 <= int(text) <= tickets_count:
+        ubd_count = int(text)
+    else:
+        await message.answer(
+            f"⚠️ Оберіть «Немає» або введіть цифру від 1 до {tickets_count}:"
+        )
+        return
+
+    await state.update_data(ubd_children_count=ubd_count)
+
+    if ubd_count > 0:
+        await message.answer(
+            "⚠️ <b>Зверніть увагу:</b> знижка для дітей та УБД діє лише за умови пред’явлення "
+            "підтверджуючого документа гіду при посадці в автобус. Без документа знижка анулюється.",
+            parse_mode="HTML",
+        )
+
+    await state.set_state(BookingForm.waiting_for_promo_code)
+    await message.answer(
+        "🎟 <b>Чи є у вас промокод або подарунковий сертифікат?</b>\n"
+        "<i>(Зверніть увагу: знижки не сумуються з промокодами та іншими акціями)</i>\n\n"
+        "Введіть промокод або натисніть кнопку <b>«⏭ Немає промокоду»</b>:",
+        parse_mode="HTML",
+        reply_markup=get_skip_or_cancel_kb("⏭ Немає промокоду"),
+    )
+
+
+@router.message(BookingForm.waiting_for_promo_code, F.text)
+async def process_promo_code(
+    message: Message, state: FSMContext, booking_service: BookingService
+):
+    text = message.text.strip()
+    if text in ("⏭ Немає промокоду", "⏭ Пропустити", "немає", "Немає"):
+        await state.update_data(promo_code=None)
+        await _ask_notes_step(message, state)
+        return
+
+    promo = await booking_service.validate_promo_code(text)
+    if not promo:
+        await message.answer(
+            "⚠️ Такого активного промокоду не знайдено.\n"
+            "Перевірте правильність написання або натисніть <b>«⏭ Немає промокоду»</b>:",
+            parse_mode="HTML",
+        )
+        return
+
+    await state.update_data(promo_code=promo.code)
+    await message.answer(
+        f"✅ Промокод <code>{html.escape(promo.code)}</code> на знижку <b>-{promo.discount_per_person} грн/ос</b> застосовано!",
+        parse_mode="HTML",
+    )
+    await _ask_notes_step(message, state)
+
+
+@router.message(BookingForm.waiting_for_notes, F.text)
+async def process_notes(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    booking_service: BookingService,
+):
+    text = message.text.strip()
+    notes = "немає" if text in ("⏭ Пропустити", "немає", "Немає") else text
+    await state.update_data(notes=notes)
+
+    data = await state.get_data()
+    tickets_count = data["tickets_count"]
+
+    # Якщо велика компанія (6 і більше осіб) — відправляємо запит у групу менеджерів без фінальної суми!
+    if tickets_count >= 6:
+        await state.clear()
+        username = message.from_user.username if message.from_user else None
+        try:
+            booking, tour = await booking_service.create_large_group_booking(
+                user_telegram_id=message.from_user.id,
+                tour_id=data["tour_id"],
+                full_name=data["full_name"],
+                phone=data["phone"],
+                age=data["age"],
+                tickets_count=tickets_count,
+                other_participants=data["other_participants"],
+                notes=notes,
+                username=username,
+            )
+        except ValueError as e:
+            await message.answer(
+                f"❌ Помилка бронювання: {e}",
+                reply_markup=get_main_menu_kb(),
+            )
+            return
+
+        # Точний текст замовника для 6+ осіб:
+        await message.answer(
+            "Ого, велика компанія! Для вас діють спеціальні індивідуальні знижки. "
+            "Менеджер зв’яжеться з вами найближчим часом для прорахунку",
+            reply_markup=get_main_menu_kb(),
+        )
+
+        user_tag = f" (@{html.escape(username)})" if username else ""
+        try:
+            await bot.send_message(
+                chat_id=settings.admin_chat_id,
+                text=(
+                    f"🔥 <b>Запит на індивідуальний прорахунок (Група 6+ осіб | Заявка #{booking.id})</b>\n\n"
+                    f"🏔 Тур: <b>{html.escape(tour.title)}</b> ({html.escape(tour.dates)})\n"
+                    f"👤 Замовник: <b>{html.escape(booking.full_name)}</b>{user_tag}\n"
+                    f"📞 Телефон: {html.escape(booking.phone)} | Вік: {booking.age}\n"
+                    f"🎟 Кількість місць: <b>{booking.tickets_count}</b>\n"
+                    f"👥 Інші учасники: {html.escape(booking.other_participants)}\n"
+                    f"📝 Нотатка: <i>{html.escape(booking.notes)}</i>\n"
+                    f"💰 Базова вартість (без знижки): {booking.amount} грн"
+                ),
+                parse_mode="HTML",
+                reply_markup=get_large_group_manager_kb(booking.id),
+            )
+        except Exception:
+            logger.exception(
+                "Не вдалося надіслати заявку великої групи #%s у групу менеджерів",
+                booking.id,
+            )
+        return
+
     await state.set_state(BookingForm.waiting_for_terms_agreement)
+    await message.answer(
+        "Останній крок перед оплатою 👇",
+        reply_markup=get_cancel_kb(),
+    )
     await message.answer(
         "Перед переходом до оплати, будь ласка, ознайомтеся та погодьтеся з умовами бронювання:",
         reply_markup=get_terms_agreement_kb(),
     )
+
+
+@router.message(BookingForm.waiting_for_terms_agreement)
+async def process_unexpected_message_during_terms(message: Message):
+    await message.answer(
+        "👆 Будь ласка, натисніть кнопку <b>«✔️ Погоджуюсь з умовами»</b> у повідомленні вище, "
+        "щоб перейти до оплати (або натисніть «❌ Скасувати» внизу).",
+        parse_mode="HTML",
+        reply_markup=get_cancel_kb(),
+    )
+
 
 
 @router.message(
@@ -711,6 +1223,10 @@ async def process_others(message: Message, state: FSMContext):
         BookingForm.waiting_for_age,
         BookingForm.waiting_for_tickets_count,
         BookingForm.waiting_for_other_participants,
+        BookingForm.waiting_for_ubd_children,
+        BookingForm.waiting_for_promo_code,
+        BookingForm.waiting_for_notes,
+        LoyalRequestForm.waiting_for_info,
     )
 )
 async def process_unexpected_non_text(message: Message):
@@ -728,6 +1244,7 @@ async def process_terms_and_send_payment_link(
     data = await state.get_data()
     await state.clear()
     user_id = callback.from_user.id
+    username = callback.from_user.username
 
     try:
         booking, tour, payment_url = (
@@ -739,28 +1256,49 @@ async def process_terms_and_send_payment_link(
                 age=data["age"],
                 tickets_count=data["tickets_count"],
                 other_participants=data["other_participants"],
+                notes=data.get("notes", "немає"),
+                ubd_children_count=data.get("ubd_children_count", 0),
+                promo_code=data.get("promo_code"),
+                username=username,
             )
         )
     except ValueError as e:
         await callback.message.answer(
             f"❌ Помилка бронювання: {e}",
-            reply_markup=get_main_menu_kb(is_admin=is_admin_user(user_id)),
+            reply_markup=get_main_menu_kb(),
         )
         await callback.answer()
         return
 
+    base_amount = tour.price * booking.tickets_count
+    discount_line = ""
+    if booking.discount_info and booking.discount_info != "немає":
+        discount_line = (
+            f"💰 Базова вартість: <s>{base_amount} грн</s>\n"
+            f"🏷 Застосована знижка: <b>{html.escape(booking.discount_info)}</b>\n"
+        )
+
+    note_line = (
+        f"📝 Ваша нотатка: <i>{html.escape(booking.notes)}</i>\n"
+        if booking.notes and booking.notes != "немає"
+        else ""
+    )
+
     first_name = html.escape(callback.from_user.first_name or "Друже")
+    deadline_str = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
     details_msg = (
         f"{first_name}, привіт, раді бачити ❤️\n\n"
         f"Бронювання туру: <b>{html.escape(tour.title)}</b>\n"
         f"👥 Кількість місць: {booking.tickets_count}\n"
-        f"💳 <b>Вартість до сплати: {booking.amount} грн</b>\n\n"
-        f"⏳ Дедлайн оплати: {html.escape(tour.payment_deadline)}\n"
+        f"{discount_line}"
+        f"💳 <b>Вартість до сплати: {booking.amount} грн</b>\n"
+        f"{note_line}\n"
+        f"⏳ Бронь місць діє до: <b>{deadline_str}</b> (15 хв на оплату)\n"
     )
 
     await callback.message.answer(
         "✅ Анкету успішно сформовано!",
-        reply_markup=get_main_menu_kb(is_admin=is_admin_user(user_id)),
+        reply_markup=get_main_menu_kb(),
     )
 
     await callback.message.answer(
@@ -769,3 +1307,12 @@ async def process_terms_and_send_payment_link(
         reply_markup=get_payment_kb(payment_url),
     )
     await callback.answer()
+
+
+@router.message(F.chat.type == "private", StateFilter(None))
+async def fallback_private_menu(message: Message):
+    await message.answer(
+        "Оберіть потрібний розділ у меню нижче 👇",
+        reply_markup=get_main_menu_kb(),
+    )
+

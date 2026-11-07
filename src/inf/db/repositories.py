@@ -1,8 +1,21 @@
 from datetime import datetime, timedelta, timezone
-from sqlalchemy import select, func, update, or_, and_
+from sqlalchemy import select, func, update, delete, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
-from src.domain.entities import TourEntity, BookingEntity, BookingStatus
-from src.inf.db.models import TourModel, BookingModel
+from src.domain.entities import (
+    TourEntity,
+    BookingEntity,
+    BookingStatus,
+    UserEntity,
+    PromoCodeEntity,
+    FaqEntity,
+)
+from src.inf.db.models import (
+    TourModel,
+    BookingModel,
+    UserModel,
+    PromoCodeModel,
+    FaqModel,
+)
 
 PENDING_HOLD_MINUTES = 15
 
@@ -22,6 +35,7 @@ class PostgresTourRepository:
             payment_deadline=model.payment_deadline,
             chat_link=model.chat_link,
             max_seats=model.max_seats,
+            duration_days=model.duration_days or 1,
             is_active=model.is_active,
         )
 
@@ -54,6 +68,7 @@ class PostgresTourRepository:
             payment_deadline=tour.payment_deadline,
             chat_link=tour.chat_link,
             max_seats=tour.max_seats,
+            duration_days=tour.duration_days,
             is_active=tour.is_active,
         )
         self._session.add(model)
@@ -62,7 +77,6 @@ class PostgresTourRepository:
         return self._to_entity(model)
 
     async def sync_tours(self, tours: list[TourEntity]) -> int:
-        # Деактивуємо всі тури перед синхронізацією; ті, що є в таблиці, стануть активними
         await self._session.execute(update(TourModel).values(is_active=False))
 
         synced_count = 0
@@ -81,6 +95,7 @@ class PostgresTourRepository:
                 existing.payment_deadline = t.payment_deadline
                 existing.chat_link = t.chat_link
                 existing.max_seats = t.max_seats
+                existing.duration_days = t.duration_days
                 existing.is_active = t.is_active
             else:
                 new_tour = TourModel(
@@ -92,6 +107,7 @@ class PostgresTourRepository:
                     payment_deadline=t.payment_deadline,
                     chat_link=t.chat_link,
                     max_seats=t.max_seats,
+                    duration_days=t.duration_days,
                     is_active=t.is_active,
                 )
                 self._session.add(new_tour)
@@ -119,6 +135,9 @@ class PostgresBookingRepository:
             amount=model.amount,
             status=BookingStatus(model.status),
             transaction_id=model.transaction_id,
+            notes=model.notes or "немає",
+            discount_info=model.discount_info or "немає",
+            username=model.username,
             created_at=model.created_at,
         )
 
@@ -133,6 +152,9 @@ class PostgresBookingRepository:
             other_participants=booking.other_participants,
             amount=booking.amount,
             status=booking.status.value,
+            notes=booking.notes,
+            discount_info=booking.discount_info,
+            username=booking.username,
         )
         self._session.add(model)
         await self._session.commit()
@@ -149,7 +171,12 @@ class PostgresBookingRepository:
             status_condition = or_(
                 BookingModel.status == BookingStatus.CONFIRMED.value,
                 and_(
-                    BookingModel.status == BookingStatus.PENDING.value,
+                    BookingModel.status.in_(
+                        [
+                            BookingStatus.PENDING.value,
+                            BookingStatus.WAITING_MANAGER.value,
+                        ]
+                    ),
                     BookingModel.created_at >= hold_threshold,
                 ),
             )
@@ -161,6 +188,14 @@ class PostgresBookingRepository:
         stmt = select(func.coalesce(func.sum(BookingModel.tickets_count), 0)).where(
             BookingModel.tour_id == tour_id,
             status_condition,
+        )
+        result = await self._session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def get_user_confirmed_bookings_count(self, user_telegram_id: int) -> int:
+        stmt = select(func.count(BookingModel.id)).where(
+            BookingModel.user_telegram_id == user_telegram_id,
+            BookingModel.status == BookingStatus.CONFIRMED.value,
         )
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
@@ -185,6 +220,24 @@ class PostgresBookingRepository:
         await self._session.refresh(model)
         return self._to_entity(model)
 
+    async def update_amount_and_status(
+        self,
+        booking_id: int,
+        amount: int,
+        discount_info: str,
+        status: BookingStatus,
+    ) -> BookingEntity | None:
+        model = await self._session.get(BookingModel, booking_id)
+        if not model:
+            return None
+        model.amount = amount
+        model.discount_info = discount_info
+        model.status = status.value
+        model.created_at = datetime.now(timezone.utc)
+        await self._session.commit()
+        await self._session.refresh(model)
+        return self._to_entity(model)
+
     async def get_confirmed_by_tour(self, tour_id: int) -> list[BookingEntity]:
         stmt = select(BookingModel).where(
             BookingModel.tour_id == tour_id,
@@ -192,3 +245,141 @@ class PostgresBookingRepository:
         )
         result = await self._session.execute(stmt)
         return [self._to_entity(row) for row in result.scalars().all()]
+
+
+class PostgresUserRepository:
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    def _to_entity(self, model: UserModel) -> UserEntity:
+        return UserEntity(
+            telegram_id=model.telegram_id,
+            full_name=model.full_name,
+            phone=model.phone,
+            username=model.username,
+            is_loyal=model.is_loyal,
+            loyal_request_pending=model.loyal_request_pending,
+        )
+
+    async def get_or_create(
+        self,
+        telegram_id: int,
+        username: str | None = None,
+        full_name: str | None = None,
+        phone: str | None = None,
+    ) -> UserEntity:
+        model = await self._session.get(UserModel, telegram_id)
+        if not model:
+            model = UserModel(
+                telegram_id=telegram_id,
+                username=username,
+                full_name=full_name,
+                phone=phone,
+                is_loyal=False,
+                loyal_request_pending=False,
+            )
+            self._session.add(model)
+        else:
+            if username:
+                model.username = username
+            if full_name:
+                model.full_name = full_name
+            if phone:
+                model.phone = phone
+        await self._session.commit()
+        await self._session.refresh(model)
+        return self._to_entity(model)
+
+    async def set_loyal_status(
+        self, telegram_id: int, is_loyal: bool, pending: bool = False
+    ) -> UserEntity | None:
+        model = await self._session.get(UserModel, telegram_id)
+        if not model:
+            model = UserModel(
+                telegram_id=telegram_id,
+                is_loyal=is_loyal,
+                loyal_request_pending=pending,
+            )
+            self._session.add(model)
+        else:
+            model.is_loyal = is_loyal
+            model.loyal_request_pending = pending
+        await self._session.commit()
+        await self._session.refresh(model)
+        return self._to_entity(model)
+
+
+class PostgresPromoCodeRepository:
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    def _to_entity(self, model: PromoCodeModel) -> PromoCodeEntity:
+        return PromoCodeEntity(
+            code=model.code,
+            discount_per_person=model.discount_per_person,
+            is_active=model.is_active,
+        )
+
+    async def get_active_by_code(self, code: str) -> PromoCodeEntity | None:
+        normalized = code.strip().upper()
+        model = await self._session.get(PromoCodeModel, normalized)
+        if model and model.is_active:
+            return self._to_entity(model)
+        return None
+
+    async def upsert_promo(self, promo: PromoCodeEntity) -> PromoCodeEntity:
+        normalized = promo.code.strip().upper()
+        model = await self._session.get(PromoCodeModel, normalized)
+        if model:
+            model.discount_per_person = promo.discount_per_person
+            model.is_active = promo.is_active
+        else:
+            model = PromoCodeModel(
+                code=normalized,
+                discount_per_person=promo.discount_per_person,
+                is_active=promo.is_active,
+            )
+            self._session.add(model)
+        await self._session.commit()
+        await self._session.refresh(model)
+        return self._to_entity(model)
+
+    async def sync_promos(self, promos: list[PromoCodeEntity]) -> int:
+        await self._session.execute(update(PromoCodeModel).values(is_active=False))
+        count = 0
+        for p in promos:
+            await self.upsert_promo(p)
+            if p.is_active:
+                count += 1
+        return count
+
+
+class PostgresFaqRepository:
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    def _to_entity(self, model: FaqModel) -> FaqEntity:
+        return FaqEntity(
+            id=model.id,
+            button_title=model.button_title,
+            answer_html=model.answer_html,
+            sort_order=model.sort_order,
+        )
+
+    async def get_all(self) -> list[FaqEntity]:
+        stmt = select(FaqModel).order_by(FaqModel.sort_order, FaqModel.id)
+        result = await self._session.execute(stmt)
+        return [self._to_entity(row) for row in result.scalars().all()]
+
+    async def sync_faqs(self, faqs: list[FaqEntity]) -> int:
+        await self._session.execute(delete(FaqModel))
+        for idx, f in enumerate(faqs):
+            self._session.add(
+                FaqModel(
+                    button_title=f.button_title,
+                    answer_html=f.answer_html,
+                    sort_order=idx,
+                )
+            )
+        await self._session.commit()
+        return len(faqs)

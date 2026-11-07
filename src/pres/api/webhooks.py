@@ -3,6 +3,8 @@ from src.config import settings
 from src.inf.db.repositories import (
     PostgresTourRepository,
     PostgresBookingRepository,
+    PostgresUserRepository,
+    PostgresPromoCodeRepository,
 )
 from src.inf.sheets.google_sheets import GoogleSheetsService
 from src.app.services import BookingService
@@ -31,6 +33,8 @@ async def liqpay_webhook(
             tour_repo=PostgresTourRepository(session),
             payment_gateway=payment_gateway,
             notifier=notifier,
+            user_repo=PostgresUserRepository(session),
+            promo_repo=PostgresPromoCodeRepository(session),
             sheets_service=sheets_service,
         )
         success = await booking_service.process_payment_webhook(data, signature)

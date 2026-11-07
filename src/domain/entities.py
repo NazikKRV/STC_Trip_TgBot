@@ -5,6 +5,7 @@ from enum import Enum
 
 class BookingStatus(str, Enum):
     PENDING = "pending"
+    WAITING_MANAGER = "waiting_manager"
     CONFIRMED = "confirmed"
     FAILED = "failed"
 
@@ -20,6 +21,7 @@ class TourEntity:
     payment_deadline: str
     chat_link: str
     max_seats: int = 59
+    duration_days: int = 1
     is_active: bool = True
 
 
@@ -36,7 +38,35 @@ class BookingEntity:
     amount: int
     status: BookingStatus = BookingStatus.PENDING
     transaction_id: str | None = None
+    notes: str = "немає"
+    discount_info: str = "немає"
+    username: str | None = None
     created_at: datetime | None = None
+
+
+@dataclass
+class UserEntity:
+    telegram_id: int
+    full_name: str | None = None
+    phone: str | None = None
+    username: str | None = None
+    is_loyal: bool = False
+    loyal_request_pending: bool = False
+
+
+@dataclass
+class PromoCodeEntity:
+    code: str
+    discount_per_person: int
+    is_active: bool = True
+
+
+@dataclass
+class FaqEntity:
+    id: int | None
+    button_title: str
+    answer_html: str
+    sort_order: int = 0
 
 
 @dataclass

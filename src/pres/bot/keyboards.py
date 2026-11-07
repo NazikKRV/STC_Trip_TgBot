@@ -5,23 +5,34 @@ from aiogram.types import (
     InlineKeyboardButton,
 )
 from src.config import settings
-from src.domain.entities import TourEntity
+from src.domain.entities import TourEntity, FaqEntity
 
 
-def get_main_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
-    keyboard = [
-        [KeyboardButton(text="🏔 Обрати тур")],
-        [
-            KeyboardButton(text="❓ Поширені питання та Умови"),
-            KeyboardButton(text="💬 Зв'язок з менеджером"),
-        ],
-    ]
-    if is_admin:
-        keyboard.append([KeyboardButton(text="⚙️ Адмін-панель")])
-
+def get_main_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
-        keyboard=keyboard,
+        keyboard=[
+            [KeyboardButton(text="🏔 Обрати тур")],
+            [
+                KeyboardButton(text="💎 Статус постійного клієнта"),
+                KeyboardButton(text="❓ Поширені питання та Умови"),
+            ],
+            [KeyboardButton(text="💬 Зв'язок з менеджером")],
+        ],
         resize_keyboard=True,
+        is_persistent=True,
+    )
+
+
+def get_managers_group_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="⚙️ Панель управління"),
+                KeyboardButton(text="🔄 Синхронізувати таблицю"),
+            ]
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
     )
 
 
@@ -32,10 +43,33 @@ def get_cancel_kb() -> ReplyKeyboardMarkup:
     )
 
 
+def get_skip_or_cancel_kb(skip_text: str = "⏭ Пропустити") -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=skip_text)],
+            [KeyboardButton(text="❌ Скасувати")],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def get_phone_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📱 Надіслати мій номер", request_contact=True)],
+            [KeyboardButton(text="❌ Скасувати")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def get_ubd_children_kb(max_count: int) -> ReplyKeyboardMarkup:
+    row = [KeyboardButton(text="Немає")]
+    numbers_row = [KeyboardButton(text=str(i)) for i in range(1, max_count + 1)]
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            row,
+            numbers_row,
             [KeyboardButton(text="❌ Скасувати")],
         ],
         resize_keyboard=True,
@@ -109,7 +143,7 @@ def get_payment_kb(payment_url: str) -> InlineKeyboardMarkup:
     )
 
 
-def get_faq_menu_kb(faq_items: dict[str, tuple[str, str]]) -> InlineKeyboardMarkup:
+def get_faq_menu_kb(faqs: list[FaqEntity]) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(
@@ -120,11 +154,11 @@ def get_faq_menu_kb(faq_items: dict[str, tuple[str, str]]) -> InlineKeyboardMark
             ),
         ]
     ]
-    for key, (question_title, _) in faq_items.items():
+    for faq in faqs:
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=question_title, callback_data=f"faq:{key}"
+                    text=faq.button_title, callback_data=f"faq:{faq.id}"
                 )
             ]
         )
@@ -143,11 +177,68 @@ def get_faq_back_kb() -> InlineKeyboardMarkup:
     )
 
 
+def get_loyal_request_start_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🙋‍♂️ Я вже їздив(ла) у 2+ тури — подати запит менеджеру",
+                    callback_data="loyal:start_request",
+                )
+            ]
+        ]
+    )
+
+
+def get_loyal_manager_decision_kb(user_telegram_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Підтвердити постійного клієнта",
+                    callback_data=f"loyal:approve:{user_telegram_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Відхилити запит",
+                    callback_data=f"loyal:reject:{user_telegram_id}",
+                )
+            ],
+        ]
+    )
+
+
+def get_large_group_manager_kb(booking_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="💳 Виставити суму зі знижкою (надіслати LiqPay)",
+                    callback_data=f"mgr_group:price:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="✅ Опрацьовано (оплачено напряму на ФОП)",
+                    callback_data=f"mgr_group:confirm:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Скасувати заявку",
+                    callback_data=f"mgr_group:cancel:{booking_id}",
+                )
+            ],
+        ]
+    )
+
+
 def get_admin_panel_kb(tours: list[TourEntity]) -> InlineKeyboardMarkup:
     buttons = [
         [
             InlineKeyboardButton(
-                text="🔄 Синхронізувати розклад з Google Таблицею",
+                text="🔄 Синхронізувати з Google Таблицею (Тури, FAQ, Промо)",
                 callback_data="admin:sync",
             )
         ]
