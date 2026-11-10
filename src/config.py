@@ -7,6 +7,15 @@ class Settings(BaseSettings):
     manager_username: str = "stc_manager"
     database_url: str
 
+    @property
+    def async_database_url(self) -> str:
+        url = self.database_url.strip()
+        if url.startswith("postgres://"):
+            return url.replace("postgres://", "postgresql+asyncpg://", 1)
+        if url.startswith("postgresql://"):
+            return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
+
     liqpay_public_key: str
     liqpay_private_key: str
     liqpay_sandbox: bool = True

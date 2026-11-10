@@ -238,22 +238,23 @@ class BookingService:
             parts.append(f"УБД/Діти до 10р ({ubd_count} ос.): -{ubd_disc} грн")
 
         if regular_count > 0:
-            if is_loyal and 3 <= tickets_count <= 5:
+            if 3 <= tickets_count <= 5:
                 reg_disc = regular_count * std_rate
                 total_discount += reg_disc
-                parts.append(
-                    f"Постійний клієнт / Група 3-5 ос. ({regular_count} ос.): -{reg_disc} грн (знижки не сумуються)"
+                label = (
+                    f"Постійний клієнт / Група 3-5 ос. ({regular_count} ос.): -{reg_disc} грн"
+                    if is_loyal
+                    else f"Група 3-5 ос. ({regular_count} ос.): -{reg_disc} грн"
                 )
+                parts.append(label)
             elif is_loyal:
-                reg_disc = regular_count * std_rate
+                # Знижка постійного клієнта діє лише на самого замовника (1 особу)
+                loyal_seats = min(1, regular_count)
+                reg_disc = loyal_seats * std_rate
                 total_discount += reg_disc
                 parts.append(
-                    f"Постійний клієнт ({regular_count} ос.): -{reg_disc} грн"
+                    f"Постійний клієнт ({loyal_seats} ос.): -{reg_disc} грн"
                 )
-            elif 3 <= tickets_count <= 5:
-                reg_disc = regular_count * std_rate
-                total_discount += reg_disc
-                parts.append(f"Група 3-5 ос. ({regular_count} ос.): -{reg_disc} грн")
 
         if total_discount == 0:
             return base_amount, 0, "немає"
@@ -278,6 +279,12 @@ class BookingService:
         tour = await self._tour_repo.get_by_id(tour_id, for_update=True)
         if not tour or not tour.is_active:
             raise ValueError("Тур не знайдено або він більше не активний")
+
+        # Скасовуємо попередні неоплачені резерви цього ж користувача на цей тур,
+        # щоб одна людина не могла штучно заблокувати всі місця в автобусі
+        await self._booking_repo.cancel_user_pending_bookings(
+            user_telegram_id, tour_id
+        )
 
         booked_seats = await self._booking_repo.get_booked_seats_count(
             tour_id, include_pending=True
@@ -342,6 +349,12 @@ class BookingService:
         tour = await self._tour_repo.get_by_id(tour_id, for_update=True)
         if not tour or not tour.is_active:
             raise ValueError("Тур не знайдено або він більше не активний")
+
+        # Скасовуємо попередні неоплачені резерви цього ж користувача на цей тур,
+        # щоб одна людина не могла штучно заблокувати всі місця в автобусі
+        await self._booking_repo.cancel_user_pending_bookings(
+            user_telegram_id, tour_id
+        )
 
         booked_seats = await self._booking_repo.get_booked_seats_count(
             tour_id, include_pending=True
@@ -463,6 +476,18 @@ class BookingService:
             return True
 
         if result.status in ("success", "sandbox"):
+            if result.currency and result.currency != "UAH":
+                await self._notifier.notify_admin_error(
+                    f"Підозрілий платіж для бронювання #{booking.id}: валюта {result.currency} замість UAH!"
+                )
+                return False
+
+            if result.amount is not None and int(round(result.amount)) < booking.amount:
+                await self._notifier.notify_admin_error(
+                    f"Підозрілий платіж для бронювання #{booking.id}: сплачено {result.amount} грн замість {booking.amount} грн!"
+                )
+                return False
+
             tour = await self._tour_repo.get_by_id(booking.tour_id, for_update=True)
             confirmed_before = await self._booking_repo.get_booked_seats_count(
                 booking.tour_id, include_pending=False

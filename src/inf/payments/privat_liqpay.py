@@ -61,15 +61,30 @@ class PrivatLiqPayGateway:
             decoded_bytes = base64.b64decode(data)
             payload = json.loads(decoded_bytes.decode("utf-8"))
 
+            if payload.get("public_key") != self._public_key:
+                return PaymentWebhookResult(is_valid=False)
+
             order_id_str: str = payload.get("order_id", "")
             parts = order_id_str.split("_")
-            booking_id = int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+            booking_id = (
+                int(parts[1]) if len(parts) >= 2 and parts[1].isdigit() else None
+            )
+
+            raw_status = payload.get("status")
+            # Забороняємо прийом sandbox-платежів, якщо в конфігу вимкнено sandbox
+            if raw_status == "sandbox" and not self._sandbox:
+                raw_status = "sandbox_rejected"
+
+            raw_amount = payload.get("amount")
+            amount = float(raw_amount) if raw_amount is not None else None
 
             return PaymentWebhookResult(
                 is_valid=True,
                 booking_id=booking_id,
-                status=payload.get("status"),
+                status=raw_status,
                 transaction_id=str(payload.get("payment_id", "")),
+                amount=amount,
+                currency=payload.get("currency"),
             )
         except Exception:
             return PaymentWebhookResult(is_valid=False)

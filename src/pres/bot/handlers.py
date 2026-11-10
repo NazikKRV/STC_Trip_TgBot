@@ -1,8 +1,11 @@
 import asyncio
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import html
 import logging
 import re
+
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import Message, CallbackQuery
@@ -306,11 +309,38 @@ async def admin_tour_group_list(
         )
 
     lines.append(f"\n<b>Всього оплачено місць: {total_seats} із {tour.max_seats}</b>")
-    await callback.message.edit_text(
-        "\n".join(lines),
-        parse_mode="HTML",
-        reply_markup=get_admin_tour_kb(tour.id),
-    )
+    full_text = "\n".join(lines)
+
+    # Захист від перевищення ліміту Telegram (4096 символів) при великій групі
+    if len(full_text) <= 3800:
+        await callback.message.edit_text(
+            full_text,
+            parse_mode="HTML",
+            reply_markup=get_admin_tour_kb(tour.id),
+        )
+    else:
+        chunks: list[str] = []
+        current_chunk: list[str] = []
+        current_len = 0
+        for line in lines:
+            if current_len + len(line) + 1 > 3800 and current_chunk:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = [line]
+                current_len = len(line)
+            else:
+                current_chunk.append(line)
+                current_len += len(line) + 1
+        if current_chunk:
+            chunks.append("\n".join(current_chunk))
+
+        await callback.message.edit_text(chunks[0], parse_mode="HTML")
+        for chunk in chunks[1:-1]:
+            await callback.message.answer(chunk, parse_mode="HTML")
+        await callback.message.answer(
+            chunks[-1],
+            parse_mode="HTML",
+            reply_markup=get_admin_tour_kb(tour.id),
+        )
     await callback.answer()
 
 
@@ -601,7 +631,7 @@ async def manager_set_custom_price(
 
     booking, tour, payment_url = res
     mgr = format_manager_name(message.from_user)
-    deadline_str = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+    deadline_str = (datetime.now(KYIV_TZ) + timedelta(minutes=15)).strftime("%H:%M")
 
     try:
         await bot.send_message(
@@ -785,8 +815,10 @@ async def process_loyal_request_info(
     booking_service: BookingService,
 ):
     info_text = message.text.strip()
-    if len(info_text) < 5:
-        await message.answer("⚠️ Будь ласка, напишіть трохи детальніше (ПІБ, телефон та тури):")
+    if len(info_text) < 5 or len(info_text) > 500:
+        await message.answer(
+            "⚠️ Повідомлення має містити від 5 до 500 символів (ПІБ, телефон та тури):"
+        )
         return
 
     await state.clear()
@@ -932,9 +964,13 @@ async def start_booking(
 async def process_name(message: Message, state: FSMContext):
     name = message.text.strip()
 
-    if len(name.split()) < 2 or not re.match(r"^[А-Яа-яІіЇїЄєҐґA-Za-z\s\-’']+$", name):
+    if (
+        len(name) > 100
+        or len(name.split()) < 2
+        or not re.match(r"^[А-Яа-яІіЇїЄєҐґA-Za-z\s\-’']+$", name)
+    ):
         await message.answer(
-            "⚠️ Будь ласка, введіть повне ПІБ (мінімум два слова, лише літери).\nСпробуйте ще раз:"
+            "⚠️ Будь ласка, введіть коректне ПІБ (мінімум два слова, лише літери, до 100 символів).\nСпробуйте ще раз:"
         )
         return
 
@@ -1049,8 +1085,10 @@ async def process_tickets_count(
 @router.message(BookingForm.waiting_for_other_participants, F.text)
 async def process_others(message: Message, state: FSMContext):
     text = message.text.strip()
-    if len(text) < 5:
-        await message.answer("⚠️ Напишіть детальніше (ПІБ та вік інших учасників):")
+    if len(text) < 5 or len(text) > 500:
+        await message.answer(
+            "⚠️ Вкажіть ПІБ та вік інших учасників (від 5 до 500 символів):"
+        )
         return
 
     await state.update_data(other_participants=text)
@@ -1109,6 +1147,10 @@ async def process_promo_code(
         await _ask_notes_step(message, state)
         return
 
+    if len(text) > 50:
+        await message.answer("⚠️ Некоректний промокод. Спробуйте ще раз або натисніть «⏭ Немає промокоду»:")
+        return
+
     promo = await booking_service.validate_promo_code(text)
     if not promo:
         await message.answer(
@@ -1134,6 +1176,11 @@ async def process_notes(
     booking_service: BookingService,
 ):
     text = message.text.strip()
+    if len(text) > 300:
+        await message.answer(
+            "⚠️ Нотатка занадто довга (максимум 300 символів). Будь ласка, скоротіть текст або натисніть «⏭ Пропустити»:"
+        )
+        return
     notes = "немає" if text in ("⏭ Пропустити", "немає", "Немає") else text
     await state.update_data(notes=notes)
 
@@ -1285,7 +1332,7 @@ async def process_terms_and_send_payment_link(
     )
 
     first_name = html.escape(callback.from_user.first_name or "Друже")
-    deadline_str = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+    deadline_str = (datetime.now(KYIV_TZ) + timedelta(minutes=15)).strftime("%H:%M")
     details_msg = (
         f"{first_name}, привіт, раді бачити ❤️\n\n"
         f"Бронювання туру: <b>{html.escape(tour.title)}</b>\n"

@@ -35,6 +35,9 @@ class IBookingRepository(Protocol):
         discount_info: str,
         status: BookingStatus,
     ) -> BookingEntity | None: ...
+    async def cancel_user_pending_bookings(
+        self, user_telegram_id: int, tour_id: int
+    ) -> None: ...
 
     async def get_confirmed_by_tour(self, tour_id: int) -> list[BookingEntity]: ...
     async def get_booked_seats_count(
