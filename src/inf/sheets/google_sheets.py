@@ -22,6 +22,14 @@ def _sanitize_sheet_title(title: str, dates: str) -> str:
     return cleaned[:95] or "Тур"
 
 
+def _sanitize_cell(value: object) -> str:
+    """Захист від Spreadsheet Formula Injection (=, +, -, @ на початку тексту)."""
+    text = str(value or "").strip()
+    if text and text[0] in ("=", "+", "-", "@", "\t", "\r"):
+        return f"'{text}"
+    return text
+
+
 class GoogleSheetsService:
     def __init__(self, credentials_path: str, sheet_id: str):
         self._credentials_path = credentials_path
@@ -177,16 +185,16 @@ class GoogleSheetsService:
                 [
                     booking.id,
                     datetime.now().strftime("%d.%m.%Y %H:%M"),
-                    booking.full_name,
-                    booking.phone,
+                    _sanitize_cell(booking.full_name),
+                    f"'{booking.phone}",
                     booking.age,
                     booking.tickets_count,
-                    booking.other_participants,
-                    booking.discount_info,
-                    booking.notes,
+                    _sanitize_cell(booking.other_participants),
+                    _sanitize_cell(booking.discount_info),
+                    _sanitize_cell(booking.notes),
                     booking.amount,
-                    booking.transaction_id or "",
-                    tg_nick,
+                    _sanitize_cell(booking.transaction_id or ""),
+                    _sanitize_cell(tg_nick),
                 ]
             )
 

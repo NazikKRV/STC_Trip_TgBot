@@ -75,3 +75,5 @@ class PaymentWebhookResult:
     booking_id: int | None = None
     status: str | None = None
     transaction_id: str | None = None
+    amount: float | None = None
+    currency: str | None = None

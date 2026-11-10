@@ -171,12 +171,7 @@ class PostgresBookingRepository:
             status_condition = or_(
                 BookingModel.status == BookingStatus.CONFIRMED.value,
                 and_(
-                    BookingModel.status.in_(
-                        [
-                            BookingStatus.PENDING.value,
-                            BookingStatus.WAITING_MANAGER.value,
-                        ]
-                    ),
+                    BookingModel.status == BookingStatus.PENDING.value,
                     BookingModel.created_at >= hold_threshold,
                 ),
             )
@@ -191,6 +186,21 @@ class PostgresBookingRepository:
         )
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
+
+    async def cancel_user_pending_bookings(
+        self, user_telegram_id: int, tour_id: int
+    ) -> None:
+        stmt = (
+            update(BookingModel)
+            .where(
+                BookingModel.user_telegram_id == user_telegram_id,
+                BookingModel.tour_id == tour_id,
+                BookingModel.status == BookingStatus.PENDING.value,
+            )
+            .values(status=BookingStatus.FAILED.value)
+        )
+        await self._session.execute(stmt)
+        await self._session.commit()
 
     async def get_user_confirmed_bookings_count(self, user_telegram_id: int) -> int:
         stmt = select(func.count(BookingModel.id)).where(
