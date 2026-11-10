@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from aiogram import Bot, Dispatcher
 from aiogram.types import (
@@ -32,7 +33,7 @@ from src.pres.api.webhooks import webhook_router
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO)
 
-    engine = create_async_engine(settings.database_url, echo=False)
+    engine = create_async_engine(settings.async_database_url, echo=False)
     session_pool = async_sessionmaker(engine, expire_on_commit=False)
 
     async with engine.begin() as conn:
@@ -113,5 +114,12 @@ app = FastAPI(title="STC TRIPS Bot & Payment Webhook API", lifespan=lifespan)
 app.include_router(webhook_router)
 
 
+@app.get("/")
+@app.get("/health")
+async def health_check():
+    return {"status": "ok", "service": "STC TRIPS Bot"}
+
+
 if __name__ == "__main__":
-    uvicorn.run("src.main:app", host="0.0.0.0", port=8000, reload=False)
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("src.main:app", host="0.0.0.0", port=port, reload=False)

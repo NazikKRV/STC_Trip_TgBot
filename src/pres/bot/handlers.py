@@ -1,8 +1,11 @@
 import asyncio
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import html
 import logging
 import re
+
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import Message, CallbackQuery
@@ -628,7 +631,7 @@ async def manager_set_custom_price(
 
     booking, tour, payment_url = res
     mgr = format_manager_name(message.from_user)
-    deadline_str = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+    deadline_str = (datetime.now(KYIV_TZ) + timedelta(minutes=15)).strftime("%H:%M")
 
     try:
         await bot.send_message(
@@ -1329,7 +1332,7 @@ async def process_terms_and_send_payment_link(
     )
 
     first_name = html.escape(callback.from_user.first_name or "Друже")
-    deadline_str = (datetime.now() + timedelta(minutes=15)).strftime("%H:%M")
+    deadline_str = (datetime.now(KYIV_TZ) + timedelta(minutes=15)).strftime("%H:%M")
     details_msg = (
         f"{first_name}, привіт, раді бачити ❤️\n\n"
         f"Бронювання туру: <b>{html.escape(tour.title)}</b>\n"

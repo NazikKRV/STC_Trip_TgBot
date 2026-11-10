@@ -1,6 +1,7 @@
 import asyncio
 import re
 from datetime import datetime
+from zoneinfo import ZoneInfo
 import gspread
 from src.domain.entities import (
     TourEntity,
@@ -8,6 +9,8 @@ from src.domain.entities import (
     FaqEntity,
     PromoCodeEntity,
 )
+
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 
 def _parse_int(value: object, default: int = 0) -> int:
@@ -184,7 +187,7 @@ class GoogleSheetsService:
             ws.append_row(
                 [
                     booking.id,
-                    datetime.now().strftime("%d.%m.%Y %H:%M"),
+                    datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M"),
                     _sanitize_cell(booking.full_name),
                     f"'{booking.phone}",
                     booking.age,
