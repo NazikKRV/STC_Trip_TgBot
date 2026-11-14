@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import re
 from sqlalchemy import select, func, update, delete, or_, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.domain.entities import (
@@ -77,18 +78,42 @@ class PostgresTourRepository:
         return self._to_entity(model)
 
     async def sync_tours(self, tours: list[TourEntity]) -> int:
-        await self._session.execute(update(TourModel).values(is_active=False))
+        def _short_date(d: str) -> str:
+            base = re.sub(r"\s*\(.*?\)", "", str(d or "")).strip()
+            return re.sub(r"\s+", " ", base).lower()
+
+        all_res = await self._session.execute(select(TourModel))
+        all_existing = list(all_res.scalars().all())
+        for m in all_existing:
+            m.is_active = False
 
         synced_count = 0
         for t in tours:
-            stmt = select(TourModel).where(
-                TourModel.title == t.title,
-                TourModel.dates == t.dates,
+            t_title_norm = re.sub(r"\s+", " ", t.title.strip()).lower()
+            t_short_date = _short_date(t.dates)
+
+            existing = next(
+                (
+                    m
+                    for m in all_existing
+                    if m.title == t.title and m.dates == t.dates
+                ),
+                None,
             )
-            result = await self._session.execute(stmt)
-            existing = result.scalar_one_or_none()
+            if not existing:
+                existing = next(
+                    (
+                        m
+                        for m in all_existing
+                        if re.sub(r"\s+", " ", m.title.strip()).lower() == t_title_norm
+                        and _short_date(m.dates) == t_short_date
+                    ),
+                    None,
+                )
 
             if existing:
+                existing.title = t.title
+                existing.dates = t.dates
                 existing.price = t.price
                 existing.program_url = t.program_url
                 existing.included_details = t.included_details
@@ -111,6 +136,7 @@ class PostgresTourRepository:
                     is_active=t.is_active,
                 )
                 self._session.add(new_tour)
+                all_existing.append(new_tour)
             if t.is_active:
                 synced_count += 1
 
@@ -170,6 +196,7 @@ class PostgresBookingRepository:
         if include_pending:
             status_condition = or_(
                 BookingModel.status == BookingStatus.CONFIRMED.value,
+                BookingModel.status == BookingStatus.WAITING_RECEIPT.value,
                 and_(
                     BookingModel.status == BookingStatus.PENDING.value,
                     BookingModel.created_at >= hold_threshold,
@@ -212,6 +239,22 @@ class PostgresBookingRepository:
 
     async def get_by_id(self, booking_id: int) -> BookingEntity | None:
         model = await self._session.get(BookingModel, booking_id)
+        return self._to_entity(model) if model else None
+
+    async def get_latest_pending_by_user(
+        self, user_telegram_id: int
+    ) -> BookingEntity | None:
+        stmt = (
+            select(BookingModel)
+            .where(
+                BookingModel.user_telegram_id == user_telegram_id,
+                BookingModel.status == BookingStatus.PENDING.value,
+            )
+            .order_by(BookingModel.id.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        model = result.scalar_one_or_none()
         return self._to_entity(model) if model else None
 
     async def update_status(

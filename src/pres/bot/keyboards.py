@@ -214,20 +214,115 @@ def get_large_group_manager_kb(booking_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="💳 Виставити суму зі знижкою (надіслати LiqPay)",
+                    text="💳 Виставити суму зі знижкою (надіслати реквізити IBAN)",
                     callback_data=f"mgr_group:price:{booking_id}",
                 )
             ],
             [
                 InlineKeyboardButton(
-                    text="✅ Опрацьовано (оплачено напряму на ФОП)",
-                    callback_data=f"mgr_group:confirm:{booking_id}",
+                    text="✅ Опрацьовано (підтвердити оплату вручну)",
+                    callback_data=f"mgr_group:confirm_ask:{booking_id}",
                 )
             ],
             [
                 InlineKeyboardButton(
                     text="❌ Скасувати заявку",
+                    callback_data=f"mgr_group:cancel_ask:{booking_id}",
+                )
+            ],
+        ]
+    )
+
+
+def get_large_group_confirm_step_kb(booking_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🟢 ТАК, точно підтвердити оплату (#{booking_id})",
+                    callback_data=f"mgr_group:confirm:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data=f"mgr_group:back:{booking_id}",
+                )
+            ],
+        ]
+    )
+
+
+def get_large_group_cancel_step_kb(booking_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🔴 ТАК, точно скасувати заявку (#{booking_id})",
                     callback_data=f"mgr_group:cancel:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data=f"mgr_group:back:{booking_id}",
+                )
+            ],
+        ]
+    )
+
+
+def get_receipt_manager_kb(booking_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Підтвердити оплату (поставити ✅ в таблиці)",
+                    callback_data=f"receipt:ask_confirm:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Відхилити оплату (поставити ❌ в таблиці)",
+                    callback_data=f"receipt:ask_reject:{booking_id}",
+                )
+            ],
+        ]
+    )
+
+
+def get_receipt_confirm_step_kb(booking_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🟢 ТАК, поставити ✅ в таблиці (#{booking_id})",
+                    callback_data=f"receipt:do_confirm:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data=f"receipt:back:{booking_id}",
+                )
+            ],
+        ]
+    )
+
+
+def get_receipt_reject_step_kb(booking_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"🔴 ТАК, поставити ❌ в таблиці (#{booking_id})",
+                    callback_data=f"receipt:do_reject:{booking_id}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data=f"receipt:back:{booking_id}",
                 )
             ],
         ]

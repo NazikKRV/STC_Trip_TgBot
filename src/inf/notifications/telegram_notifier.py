@@ -59,7 +59,7 @@ class TelegramNotificationService:
                     f"🏷 Знижки / Пільги: <b>{safe_discounts}</b>\n"
                     f"📝 Нотатка: <i>{safe_notes}</i>\n"
                     f"💰 Сплачено: <b>{booking.amount} грн</b>\n"
-                    f"🧾 ID транзакції: <code>{safe_tx}</code>"
+                    f"🧾 Статус оплати: <code>{safe_tx}</code>"
                 ),
                 parse_mode="HTML",
                 reply_markup=get_managers_group_kb(),

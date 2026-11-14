@@ -1,11 +1,14 @@
 import asyncio
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import html
 import logging
 import re
 
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
+try:
+    KYIV_TZ = ZoneInfo("Europe/Kyiv")
+except ZoneInfoNotFoundError:
+    KYIV_TZ = datetime.now().astimezone().tzinfo or timezone(timedelta(hours=2))
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import Message, CallbackQuery
@@ -24,7 +27,6 @@ from src.pres.bot.keyboards import (
     get_tours_kb,
     get_tour_action_kb,
     get_terms_agreement_kb,
-    get_payment_kb,
     get_cancel_kb,
     get_skip_or_cancel_kb,
     get_phone_kb,
@@ -34,6 +36,11 @@ from src.pres.bot.keyboards import (
     get_loyal_request_start_kb,
     get_loyal_manager_decision_kb,
     get_large_group_manager_kb,
+    get_large_group_confirm_step_kb,
+    get_large_group_cancel_step_kb,
+    get_receipt_manager_kb,
+    get_receipt_confirm_step_kb,
+    get_receipt_reject_step_kb,
     get_admin_panel_kb,
     get_admin_tour_kb,
     get_admin_confirm_chat_kb,
@@ -91,6 +98,55 @@ FAQ_MAIN_TEXT = (
     f"📃 Опис умов повернення коштів: {settings.refund_policy_url}\n\n"
     "👇 <b>Оберіть питання зі списку нижче, щоб переглянути відповідь:</b>"
 )
+
+IBAN_NUMBER = "UA583052990000026004001016360"
+IBAN_PURPOSE = "За послуги по договору публічної оферти"
+IBAN_HOWTO_URL = "https://cutt.ly/lR34hxj"
+
+
+def build_iban_requisites_text() -> str:
+    return (
+        "✅ <b>Реквізити на оплату послуг компанії:</b>\n\n"
+        "▫️ Найменування отримувача: <b>ФОП Озарко Тарас-Ярослав Петрович</b>\n"
+        "▫️ Код отримувача: <code>3659407214</code>\n"
+        f"👉🏻 Рахунок отримувача у форматі відповідно до стандарту IBAN:\n<code>{IBAN_NUMBER}</code>\n"
+        '▫️ Назва банку: <b>АТ КБ "ПРИВАТБАНК"</b>\n'
+        f"👉🏻 Призначення платежу в платіжці: «<code>{IBAN_PURPOSE}</code>»\n\n"
+        "УВАГА❗️ Платежі з неправильно вказаним призначенням або без нього: повертаються, як не з'ясовані!\n\n"
+        "▫️ <b>Прохання опісля оплати надіслати скрін-квитанцію сюди у бот!</b>\n\n"
+        f"🙋🏻‍♂️ Як здійснити оплату на рахунок IBAN? {IBAN_HOWTO_URL}\n"
+        f"📃 Договір публічної оферти: {settings.public_offer_url}\n"
+        f"📃 Опис умов повернення коштів: {settings.refund_policy_url}"
+    )
+
+
+async def send_iban_payment_instructions(
+    bot: Bot, chat_id: int, summary_html: str
+) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"{summary_html}\n{build_iban_requisites_text()}",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+    await bot.send_message(
+        chat_id=chat_id,
+        text=IBAN_NUMBER,
+    )
+    await bot.send_message(
+        chat_id=chat_id,
+        text=f"«{IBAN_PURPOSE}»",
+    )
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            "📸 <b>Очікуємо на скрін-квитанцію!</b>\n"
+            "Будь ласка, надішліть у цей чат <b>фото (скріншот) або PDF-файл квитанції</b> про оплату — "
+            "менеджер перевірить платіж і підтвердить ваше бронювання ❤️"
+        ),
+        parse_mode="HTML",
+        reply_markup=get_cancel_kb(),
+    )
 
 
 # ==================== ДОПОМІЖНА КОМАНДА /id ====================
@@ -594,7 +650,7 @@ async def manager_ask_custom_price(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ManagerCustomPriceForm.waiting_for_custom_amount)
     await callback.message.reply(
         f"💳 Введіть узгоджену загальну суму до сплати (у грн, лише числом) для <b>Бронювання #{booking_id}</b>.\n"
-        "Після введення бот автоматично надішле клієнту посилання на оплату LiqPay:",
+        "Після введення бот автоматично надішле клієнту реквізити IBAN та попросить надіслати квитанцію:",
         parse_mode="HTML",
     )
     await callback.answer()
@@ -629,26 +685,26 @@ async def manager_set_custom_price(
         await message.reply("❌ Бронювання не знайдено.")
         return
 
-    booking, tour, payment_url = res
+    booking, tour, _ = res
     mgr = format_manager_name(message.from_user)
     deadline_str = (datetime.now(KYIV_TZ) + timedelta(minutes=15)).strftime("%H:%M")
 
+    summary_html = (
+        f"🎉 <b>Індивідуальний прорахунок для вашої компанії готовий!</b>\n\n"
+        f"🏔 Тур: <b>{html.escape(tour.title)}</b> ({html.escape(tour.dates)})\n"
+        f"👥 Кількість місць: <b>{booking.tickets_count}</b>\n"
+        f"💳 <b>Узгоджена вартість зі знижкою: {booking.amount} грн</b>\n"
+        f"⏳ Бронь місць діє до: <b>{deadline_str}</b> (15 хв на оплату)\n"
+    )
+
     try:
-        await bot.send_message(
+        await send_iban_payment_instructions(
+            bot=bot,
             chat_id=booking.user_telegram_id,
-            text=(
-                f"🎉 <b>Індивідуальний прорахунок для вашої компанії готовий!</b>\n\n"
-                f"🏔 Тур: <b>{html.escape(tour.title)}</b> ({html.escape(tour.dates)})\n"
-                f"👥 Кількість місць: <b>{booking.tickets_count}</b>\n"
-                f"💳 <b>Узгоджена вартість зі знижкою: {booking.amount} грн</b>\n"
-                f"⏳ Бронь місць діє до: <b>{deadline_str}</b> (15 хв на оплату)\n\n"
-                f"Натисніть кнопку нижче для безпечної оплати:"
-            ),
-            parse_mode="HTML",
-            reply_markup=get_payment_kb(payment_url),
+            summary_html=summary_html,
         )
     except Exception as e:
-        await message.reply(f"⚠️ Не вдалося надіслати посилання клієнту: {e}")
+        await message.reply(f"⚠️ Не вдалося надіслати реквізити клієнту: {e}")
         return
 
     if group_msg_id and group_msg_html:
@@ -658,7 +714,7 @@ async def manager_set_custom_price(
                 message_id=group_msg_id,
                 text=(
                     f"{group_msg_html}\n\n"
-                    f"💳 <b>Виставлено рахунок на {custom_amount} грн</b> (менеджер: {mgr}). Очікуємо оплату від клієнта."
+                    f"💳 <b>Виставлено рахунок на {custom_amount} грн</b> (менеджер: {mgr}). Очікуємо квитанцію від клієнта."
                 ),
                 parse_mode="HTML",
                 reply_markup=get_large_group_manager_kb(booking_id),
@@ -667,9 +723,56 @@ async def manager_set_custom_price(
             pass
 
     await message.reply(
-        f"✅ Посилання на оплату <b>{custom_amount} грн</b> успішно надіслано клієнту {html.escape(booking.full_name)}!",
+        f"✅ Реквізити на оплату <b>{custom_amount} грн</b> успішно надіслано клієнту {html.escape(booking.full_name)}!\n"
+        "Коли клієнт надішле квитанцію в бот, вона з'явиться тут у чаті.",
         parse_mode="HTML",
     )
+
+
+@router.callback_query(F.data.startswith("mgr_group:confirm_ask:"))
+async def manager_ask_confirm_group_booking(callback: CallbackQuery):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    await callback.answer(
+        f"⚠️ Ви впевнені, що хочете підтвердити оплату для бронювання #{booking_id}?\n"
+        "Натисніть зелену кнопку нижче для остаточного підтвердження.",
+        show_alert=True,
+    )
+    await callback.message.edit_reply_markup(
+        reply_markup=get_large_group_confirm_step_kb(booking_id)
+    )
+
+
+@router.callback_query(F.data.startswith("mgr_group:cancel_ask:"))
+async def manager_ask_cancel_group_booking(callback: CallbackQuery):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    await callback.answer(
+        f"⚠️ Ви впевнені, що хочете скасувати заявку #{booking_id}?",
+        show_alert=True,
+    )
+    await callback.message.edit_reply_markup(
+        reply_markup=get_large_group_cancel_step_kb(booking_id)
+    )
+
+
+@router.callback_query(F.data.startswith("mgr_group:back:"))
+async def manager_back_group_booking(callback: CallbackQuery):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    await callback.message.edit_reply_markup(
+        reply_markup=get_large_group_manager_kb(booking_id)
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith("mgr_group:confirm:"))
@@ -723,6 +826,117 @@ async def manager_cancel_group_booking(
     except Exception:
         pass
     await callback.answer("Заявку скасовано")
+
+
+async def _edit_receipt_message_status(message: Message, status_line_html: str):
+    if message.caption is not None:
+        base_html = message.html_text or ""
+        await message.edit_caption(
+            caption=f"{base_html}\n\n{status_line_html}",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+    else:
+        base_html = message.html_text or ""
+        await message.edit_text(
+            text=f"{base_html}\n\n{status_line_html}",
+            parse_mode="HTML",
+            reply_markup=None,
+        )
+
+
+@router.callback_query(F.data.startswith("receipt:ask_confirm:"))
+async def manager_ask_confirm_receipt(callback: CallbackQuery):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    await callback.answer(
+        f"⚠️ УВАГА! Перевірте суму та реквізити на квитанції для бронювання #{booking_id}.\n\n"
+        "Ви точно хочете підтвердити оплату? Натисніть зелену кнопку нижче.",
+        show_alert=True,
+    )
+    await callback.message.edit_reply_markup(
+        reply_markup=get_receipt_confirm_step_kb(booking_id)
+    )
+
+
+@router.callback_query(F.data.startswith("receipt:ask_reject:"))
+async def manager_ask_reject_receipt(callback: CallbackQuery):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    await callback.answer(
+        f"⚠️ Ви точно хочете відхилити квитанцію для бронювання #{booking_id}?",
+        show_alert=True,
+    )
+    await callback.message.edit_reply_markup(
+        reply_markup=get_receipt_reject_step_kb(booking_id)
+    )
+
+
+@router.callback_query(F.data.startswith("receipt:back:"))
+async def manager_back_receipt(callback: CallbackQuery):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    await callback.message.edit_reply_markup(
+        reply_markup=get_receipt_manager_kb(booking_id)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("receipt:do_confirm:"))
+async def manager_do_confirm_receipt(
+    callback: CallbackQuery, booking_service: BookingService
+):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    mgr = format_manager_name(callback.from_user)
+    res = await booking_service.verify_receipt_by_manager(
+        booking_id=booking_id, is_approved=True
+    )
+    if not res:
+        await callback.answer("Бронювання не знайдено", show_alert=True)
+        return
+
+    await _edit_receipt_message_status(
+        callback.message,
+        f"✅ <b>Оплату перевірено (у таблиці встановлено ✅)</b> (опрацював: {mgr})",
+    )
+    await callback.answer("✅ У таблиці встановлено зелену галочку!")
+
+
+@router.callback_query(F.data.startswith("receipt:do_reject:"))
+async def manager_do_reject_receipt(
+    callback: CallbackQuery, booking_service: BookingService
+):
+    if not is_managers_chat(callback.message.chat.id):
+        await callback.answer("⛔ Доступ лише в групі менеджерів", show_alert=True)
+        return
+
+    booking_id = int(callback.data.split(":")[2])
+    mgr = format_manager_name(callback.from_user)
+    res = await booking_service.verify_receipt_by_manager(
+        booking_id=booking_id, is_approved=False
+    )
+    if not res:
+        await callback.answer("Бронювання не знайдено", show_alert=True)
+        return
+
+    await _edit_receipt_message_status(
+        callback.message,
+        f"❌ <b>Оплату відхилено (у таблиці встановлено ❌)</b> (опрацював: {mgr})",
+    )
+    await callback.answer("❌ У таблиці встановлено червоний хрестик!")
 
 
 # ==================== КЛІЄНТСЬКІ ХЕНДЛЕРИ ====================
@@ -977,36 +1191,43 @@ async def process_name(message: Message, state: FSMContext):
     await state.update_data(full_name=name)
     await state.set_state(BookingForm.waiting_for_phone)
     await message.answer(
-        "Введіть Ваш контактний номер телефону (у будь-якому форматі: 097..., 098..., 067..., 050..., +380...) "
-        "або натисніть кнопку <b>«📱 Надіслати мій номер»</b> нижче:",
+        "📱 Для продовження бронювання натисніть кнопку <b>«📱 Надіслати мій номер»</b> внизу екрана 👇",
         parse_mode="HTML",
         reply_markup=get_phone_kb(),
     )
 
 
-@router.message(BookingForm.waiting_for_phone, F.text | F.contact)
+@router.message(BookingForm.waiting_for_phone, F.contact)
 async def process_phone(message: Message, state: FSMContext):
-    phone_raw = (
-        message.contact.phone_number
-        if message.contact
-        else (message.text or "").strip()
-    )
-    normalized_phone = normalize_phone_number(phone_raw)
-
-    if not normalized_phone:
+    if message.contact.user_id and message.contact.user_id != message.from_user.id:
         await message.answer(
-            "⚠️ Некоректний номер телефону.\n"
-            "Будь ласка, введіть дійсний номер (наприклад: <code>0981234567</code>, <code>097 123 45 67</code>, "
-            "<code>0671234567</code> або <code>+380501234567</code>) чи натисніть кнопку «📱 Надіслати мій номер»:",
+            "⚠️ Будь ласка, надішліть саме <b>свій</b> номер телефону за допомогою кнопки <b>«📱 Надіслати мій номер»</b> внизу екрана 👇",
             parse_mode="HTML",
+            reply_markup=get_phone_kb(),
         )
         return
+
+    phone_raw = message.contact.phone_number or ""
+    digits = re.sub(r"\D", "", phone_raw)
+    normalized_phone = normalize_phone_number(phone_raw) or (
+        f"+{digits}" if digits else phone_raw
+    )
 
     await state.update_data(phone=normalized_phone)
     await state.set_state(BookingForm.waiting_for_age)
     await message.answer(
         "Вкажіть Ваш вік (лише числом):",
         reply_markup=get_cancel_kb(),
+    )
+
+
+@router.message(BookingForm.waiting_for_phone)
+async def reject_manual_phone_input(message: Message):
+    await message.answer(
+        "⚠️ Введення номера з клавіатури вимкнено.\n"
+        "Будь ласка, натисніть кнопку <b>«📱 Надіслати мій номер»</b> внизу екрана 👇",
+        parse_mode="HTML",
+        reply_markup=get_phone_kb(),
     )
 
 
@@ -1266,7 +1487,6 @@ async def process_unexpected_message_during_terms(message: Message):
 @router.message(
     StateFilter(
         BookingForm.waiting_for_full_name,
-        BookingForm.waiting_for_phone,
         BookingForm.waiting_for_age,
         BookingForm.waiting_for_tickets_count,
         BookingForm.waiting_for_other_participants,
@@ -1286,6 +1506,7 @@ async def process_unexpected_non_text(message: Message):
 async def process_terms_and_send_payment_link(
     callback: CallbackQuery,
     state: FSMContext,
+    bot: Bot,
     booking_service: BookingService,
 ):
     data = await state.get_data()
@@ -1294,7 +1515,7 @@ async def process_terms_and_send_payment_link(
     username = callback.from_user.username
 
     try:
-        booking, tour, payment_url = (
+        booking, tour, _ = (
             await booking_service.create_booking_with_payment_link(
                 user_telegram_id=user_id,
                 tour_id=data["tour_id"],
@@ -1339,21 +1560,150 @@ async def process_terms_and_send_payment_link(
         f"👥 Кількість місць: {booking.tickets_count}\n"
         f"{discount_line}"
         f"💳 <b>Вартість до сплати: {booking.amount} грн</b>\n"
-        f"{note_line}\n"
+        f"{note_line}"
         f"⏳ Бронь місць діє до: <b>{deadline_str}</b> (15 хв на оплату)\n"
     )
 
+    await state.set_state(BookingForm.waiting_for_receipt)
+    await state.update_data(receipt_booking_id=booking.id)
+
     await callback.message.answer(
         "✅ Анкету успішно сформовано!",
+        reply_markup=get_cancel_kb(),
+    )
+
+    await send_iban_payment_instructions(
+        bot=bot,
+        chat_id=callback.message.chat.id,
+        summary_html=details_msg,
+    )
+    await callback.answer()
+
+
+async def _delayed_receipt_confirmation(
+    bot: Bot,
+    user_telegram_id: int,
+    booking_id: int,
+    tour_title: str,
+    tour_dates: str,
+    delay_seconds: int = 60,
+):
+    await asyncio.sleep(delay_seconds)
+    safe_title = html.escape(tour_title)
+    safe_dates = html.escape(tour_dates)
+    try:
+        await bot.send_message(
+            chat_id=user_telegram_id,
+            text=(
+                f"🎉 <b>Оплату успішно отримано!</b>\n\n"
+                f"Ваше місце в турі <b>{safe_title}</b> ({safe_dates}) офіційно заброньовано.\n"
+                f"Вас автоматично додано до списку групи ✅\n\n"
+                f"За 2 дні до виїзду бот надішле Вам сюди посилання на організаційний чат туру ❤️"
+            ),
+            parse_mode="HTML",
+            reply_markup=get_main_menu_kb(),
+        )
+    except Exception:
+        logger.exception(
+            "Не вдалося надіслати відкладене підтвердження туристу %s (бронювання #%s)",
+            user_telegram_id,
+            booking_id,
+        )
+
+
+@router.message(
+    F.chat.type == "private",
+    F.photo | F.document,
+    StateFilter(BookingForm.waiting_for_receipt, None),
+)
+async def process_payment_receipt(
+    message: Message,
+    state: FSMContext,
+    bot: Bot,
+    booking_service: BookingService,
+):
+    data = await state.get_data()
+    receipt_booking_id = data.get("receipt_booking_id")
+    user_id = message.from_user.id
+
+    res = await booking_service.mark_receipt_submitted(
+        booking_id=receipt_booking_id,
+        user_telegram_id=user_id,
+    )
+    if not res:
+        await message.answer(
+            "ℹ️ У вас наразі немає активного очікуючого бронювання для прикріплення квитанції.\n"
+            "Оберіть тур у меню нижче або напишіть нашому менеджеру 👇",
+            reply_markup=get_main_menu_kb(),
+        )
+        return
+
+    await state.clear()
+    booking, tour = res
+    user_tag = f" (@{html.escape(booking.username)})" if booking.username else ""
+
+    caption_html = (
+        f"🧾 <b>Нове бронювання з квитанцією (#{booking.id})</b>\n"
+        f"📋 <i>Додано в таблицю зі статусом 🌹 (очікує звірки менеджером)</i>\n\n"
+        f"🏔 Тур: <b>{html.escape(tour.title)}</b> ({html.escape(tour.dates)})\n"
+        f"👤 Турист: <b>{html.escape(booking.full_name)}</b>{user_tag}\n"
+        f"📞 Тел: {html.escape(booking.phone)} | Вік: {booking.age}\n"
+        f"🎟 Кількість місць: <b>{booking.tickets_count}</b>\n"
+        f"👥 Інші учасники: {html.escape(booking.other_participants)}\n"
+        f"🏷 Знижки / Пільги: <b>{html.escape(booking.discount_info)}</b>\n"
+        f"📝 Нотатка: <i>{html.escape(booking.notes)}</i>\n"
+        f"💳 <b>Сума до сплати: {booking.amount} грн</b>"
+    )
+
+    try:
+        if message.photo:
+            await bot.send_photo(
+                chat_id=settings.admin_chat_id,
+                photo=message.photo[-1].file_id,
+                caption=caption_html,
+                parse_mode="HTML",
+                reply_markup=get_receipt_manager_kb(booking.id),
+            )
+        elif message.document:
+            await bot.send_document(
+                chat_id=settings.admin_chat_id,
+                document=message.document.file_id,
+                caption=caption_html,
+                parse_mode="HTML",
+                reply_markup=get_receipt_manager_kb(booking.id),
+            )
+    except Exception:
+        logger.exception(
+            "Не вдалося переслати квитанцію бронювання #%s у чат менеджерів",
+            booking.id,
+        )
+
+    await message.answer(
+        "⏳ <b>Дякуємо! Вашу квитанцію отримано, обробляємо інформацію...</b>",
+        parse_mode="HTML",
         reply_markup=get_main_menu_kb(),
     )
 
-    await callback.message.answer(
-        details_msg,
-        parse_mode="HTML",
-        reply_markup=get_payment_kb(payment_url),
+    asyncio.create_task(
+        _delayed_receipt_confirmation(
+            bot=bot,
+            user_telegram_id=booking.user_telegram_id,
+            booking_id=booking.id,
+            tour_title=tour.title,
+            tour_dates=tour.dates,
+            delay_seconds=60,
+        )
     )
-    await callback.answer()
+
+
+@router.message(BookingForm.waiting_for_receipt)
+async def process_unexpected_during_receipt(message: Message):
+    await message.answer(
+        "📸 Будь ласка, надішліть <b>фото (скріншот) або PDF-файл квитанції</b> про оплату "
+        "(або натисніть «❌ Скасувати», щоб повернутися в головне меню).",
+        parse_mode="HTML",
+        reply_markup=get_cancel_kb(),
+    )
 
 
 @router.message(F.chat.type == "private", StateFilter(None))

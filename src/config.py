@@ -16,10 +16,10 @@ class Settings(BaseSettings):
             return url.replace("postgresql://", "postgresql+asyncpg://", 1)
         return url
 
-    liqpay_public_key: str
-    liqpay_private_key: str
+    liqpay_public_key: str = ""
+    liqpay_private_key: str = ""
     liqpay_sandbox: bool = True
-    webhook_base_url: str
+    webhook_base_url: str = "http://localhost:8000"
 
     public_offer_url: str = "https://cutt.ly/Wtwtl8P7"
     refund_policy_url: str = "https://cutt.ly/KR7c35q"

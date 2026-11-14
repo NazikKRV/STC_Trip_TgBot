@@ -6,6 +6,7 @@ from enum import Enum
 class BookingStatus(str, Enum):
     PENDING = "pending"
     WAITING_MANAGER = "waiting_manager"
+    WAITING_RECEIPT = "waiting_receipt"
     CONFIRMED = "confirmed"
     FAILED = "failed"
 
