@@ -26,6 +26,7 @@ class Settings(BaseSettings):
 
     google_sheet_id: str
     google_credentials_path: str = "google_credentials.json"
+    google_credentials_json: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from pathlib import Path
 from contextlib import asynccontextmanager
 from aiogram import Bot, Dispatcher
 from aiogram.types import (
@@ -32,6 +33,14 @@ from src.pres.api.webhooks import webhook_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO)
+
+    if settings.google_credentials_json.strip():
+        creds_path = Path(settings.google_credentials_path)
+        if not creds_path.exists():
+            creds_path.write_text(
+                settings.google_credentials_json.strip(), encoding="utf-8"
+            )
+            logging.info("Створено %s зі змінної GOOGLE_CREDENTIALS_JSON", creds_path)
 
     engine = create_async_engine(settings.async_database_url, echo=False)
     session_pool = async_sessionmaker(engine, expire_on_commit=False)
