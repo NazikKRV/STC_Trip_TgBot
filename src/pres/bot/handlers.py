@@ -9,9 +9,10 @@ try:
     KYIV_TZ = ZoneInfo("Europe/Kyiv")
 except ZoneInfoNotFoundError:
     KYIV_TZ = datetime.now().astimezone().tzinfo or timezone(timedelta(hours=2))
+from pathlib import Path
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, Command, StateFilter
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, FSInputFile
 from aiogram.fsm.context import FSMContext
 
 from src.config import settings
@@ -941,16 +942,55 @@ async def manager_do_reject_receipt(
 
 # ==================== КЛІЄНТСЬКІ ХЕНДЛЕРИ ====================
 
+WELCOME_PHOTO_PATH = Path(__file__).resolve().parents[2] / "assets" / "welcome.jpg"
+_cached_welcome_photo_id: str | None = None
+
 
 @router.message(CommandStart(), StateFilter("*"))
 async def cmd_start(message: Message, state: FSMContext):
+    global _cached_welcome_photo_id
     await state.clear()
-    first_name = message.from_user.first_name if message.from_user else "Друже"
-    await message.answer(
-        f"{first_name}, привіт, раді бачити ❤️\n\n"
-        "Обирай актуальний тур у меню нижче та бронюй місце онлайн без черг!",
-        reply_markup=get_main_menu_kb(),
+    first_name = html.escape(
+        message.from_user.first_name if message.from_user and message.from_user.first_name else "Друже"
     )
+    welcome_text = (
+        f"Привіт, <b>{first_name}</b>! Раді бачити тебе в сім’ї <b>STC TRIPS | Student Travel Club</b> 🏔❤️\n\n"
+        "Ми створюємо мандрівки, з яких повертаються з новими друзями, сотнями фото та спогадами на все життя! ✨\n\n"
+        "<b>У цьому боті ти можеш за 2 хвилини:</b>\n"
+        "🏔 <b>Обрати актуальний тур</b> та переглянути детальну програму\n"
+        "🎟 <b>Забронювати місце онлайн</b> (самостійно або для всієї компанії)\n"
+        "💎 <b>Отримати знижку</b> постійного клієнта, для групи друзів, УБД/дітей або за промокодом\n"
+        "❓ <b>Дізнатися відповіді</b> на всі організаційні питання\n\n"
+        "👇 <b>Тисни на кнопки меню внизу та гайда назустріч пригодам!</b>"
+    )
+
+    if _cached_welcome_photo_id:
+        try:
+            await message.answer_photo(
+                photo=_cached_welcome_photo_id,
+                caption=welcome_text,
+                parse_mode="HTML",
+                reply_markup=get_main_menu_kb(),
+            )
+            return
+        except Exception:
+            _cached_welcome_photo_id = None
+
+    if WELCOME_PHOTO_PATH.exists():
+        sent = await message.answer_photo(
+            photo=FSInputFile(WELCOME_PHOTO_PATH),
+            caption=welcome_text,
+            parse_mode="HTML",
+            reply_markup=get_main_menu_kb(),
+        )
+        if sent.photo:
+            _cached_welcome_photo_id = sent.photo[-1].file_id
+    else:
+        await message.answer(
+            welcome_text,
+            parse_mode="HTML",
+            reply_markup=get_main_menu_kb(),
+        )
 
 
 @router.message(F.text == "❌ Скасувати", StateFilter("*"))
