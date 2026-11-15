@@ -423,30 +423,107 @@ class BookingService:
         )
         return updated, tour, payment_url
 
-    async def confirm_booking_manually(
-        self, booking_id: int, manager_tag: str
+    async def get_booking_with_tour(
+        self, booking_id: int
     ) -> tuple[BookingEntity, TourEntity] | None:
         booking = await self._booking_repo.get_by_id(booking_id)
         if not booking:
             return None
-        if booking.status == BookingStatus.CONFIRMED:
-            tour = await self._tour_repo.get_by_id(booking.tour_id)
-            return (booking, tour) if tour else None
+        tour = await self._tour_repo.get_by_id(booking.tour_id)
+        if not tour:
+            return None
+        return booking, tour
+
+    async def mark_receipt_submitted(
+        self, booking_id: int | None, user_telegram_id: int
+    ) -> tuple[BookingEntity, TourEntity] | None:
+        booking = None
+        if booking_id:
+            booking = await self._booking_repo.get_by_id(booking_id)
+            if booking and booking.user_telegram_id != user_telegram_id:
+                booking = None
+        if not booking or booking.status != BookingStatus.PENDING:
+            booking = await self._booking_repo.get_latest_pending_by_user(
+                user_telegram_id
+            )
+        if not booking:
+            return None
 
         tour = await self._tour_repo.get_by_id(booking.tour_id)
         if not tour:
             return None
 
         updated = await self._booking_repo.update_status(
+            booking_id=booking.id,
+            status=BookingStatus.CONFIRMED,
+            transaction_id="🌹",
+        )
+        if updated and self._sheets_service:
+            try:
+                await self._sheets_service.append_paid_booking(tour, updated)
+            except Exception as e:
+                logger.exception("Помилка запису в Google Sheets")
+                await self._notifier.notify_admin_error(
+                    f"Не вдалося записати бронювання #{updated.id} у Google Sheets: {e}"
+                )
+        return (updated, tour) if updated else None
+
+    async def verify_receipt_by_manager(
+        self, booking_id: int, is_approved: bool
+    ) -> tuple[BookingEntity, TourEntity] | None:
+        booking = await self._booking_repo.get_by_id(booking_id)
+        if not booking:
+            return None
+        tour = await self._tour_repo.get_by_id(booking.tour_id)
+        if not tour:
+            return None
+
+        mark = "✅" if is_approved else "❌"
+        new_status = (
+            BookingStatus.CONFIRMED if is_approved else BookingStatus.FAILED
+        )
+
+        updated = await self._booking_repo.update_status(
+            booking_id=booking_id,
+            status=new_status,
+            transaction_id=mark,
+        )
+        if updated and self._sheets_service:
+            try:
+                await self._sheets_service.update_booking_payment_mark(
+                    tour, updated, mark
+                )
+            except Exception as e:
+                logger.exception("Помилка оновлення позначки в Google Sheets")
+                await self._notifier.notify_admin_error(
+                    f"Не вдалося оновити позначку {mark} для бронювання #{booking_id} у Google Sheets: {e}"
+                )
+        return (updated, tour) if updated else None
+
+    async def confirm_booking_manually(
+        self, booking_id: int, manager_tag: str
+    ) -> tuple[BookingEntity, TourEntity] | None:
+        booking = await self._booking_repo.get_by_id(booking_id)
+        if not booking:
+            return None
+        tour = await self._tour_repo.get_by_id(booking.tour_id)
+        if not tour:
+            return None
+
+        already_confirmed = booking.status == BookingStatus.CONFIRMED
+        updated = await self._booking_repo.update_status(
             booking_id=booking_id,
             status=BookingStatus.CONFIRMED,
-            transaction_id=f"Підтверджено менеджером {manager_tag}",
+            transaction_id="✅",
         )
         if updated:
-            await self._notifier.notify_booking_confirmed(updated, tour)
+            if not already_confirmed:
+                await self._notifier.notify_booking_confirmed(updated, tour)
             if self._sheets_service:
                 try:
-                    await self._sheets_service.append_paid_booking(tour, updated)
+                    await self._sheets_service.update_booking_payment_mark(
+                        tour, updated, "✅"
+                    )
                 except Exception as e:
                     logger.exception("Помилка запису в Google Sheets")
                     await self._notifier.notify_admin_error(

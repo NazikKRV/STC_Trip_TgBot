@@ -1,7 +1,7 @@
 import asyncio
 import re
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import gspread
 from src.domain.entities import (
     TourEntity,
@@ -10,7 +10,10 @@ from src.domain.entities import (
     PromoCodeEntity,
 )
 
-KYIV_TZ = ZoneInfo("Europe/Kyiv")
+try:
+    KYIV_TZ = ZoneInfo("Europe/Kyiv")
+except ZoneInfoNotFoundError:
+    KYIV_TZ = datetime.now().astimezone().tzinfo or timezone(timedelta(hours=2))
 
 
 def _parse_int(value: object, default: int = 0) -> int:
@@ -18,19 +21,24 @@ def _parse_int(value: object, default: int = 0) -> int:
     return int(digits) if digits else default
 
 
+def _extract_short_date(dates: str) -> str:
+    """Відрізає час у дужках із поля Дати, напр. '20 листопада (08:00 - 22:30)' -> '20 листопада'."""
+    base = re.sub(r"\s*\(.*?\)", "", str(dates or "")).strip()
+    base = re.sub(r"\s+", " ", base)
+    return base or str(dates or "").strip()
+
+
 def _sanitize_sheet_title(title: str, dates: str) -> str:
-    raw = f"{title[:30]} ({dates[:15]})"
+    clean_title = re.sub(r"\s+", " ", str(title or "").strip())
+    short_date = _extract_short_date(dates)
+    raw = f"{clean_title[:60]} ({short_date[:30]})" if short_date else clean_title[:90]
     cleaned = re.sub(r"[\[\]\*\?\/\\:]", "-", raw)
     cleaned = cleaned.strip().strip("'")
     return cleaned[:95] or "Тур"
 
 
 def _sanitize_cell(value: object) -> str:
-    """Захист від Spreadsheet Formula Injection (=, +, -, @ на початку тексту)."""
-    text = str(value or "").strip()
-    if text and text[0] in ("=", "+", "-", "@", "\t", "\r"):
-        return f"'{text}"
-    return text
+    return str(value or "").strip()
 
 
 class GoogleSheetsService:
@@ -150,38 +158,69 @@ class GoogleSheetsService:
 
         return await asyncio.to_thread(_sync_promos)
 
+    def _find_or_create_tour_worksheet(
+        self, sh: gspread.Spreadsheet, tour: TourEntity, create_if_missing: bool = True
+    ) -> gspread.Worksheet | None:
+        sheet_title = _sanitize_sheet_title(tour.title, tour.dates)
+        headers = [
+            "ID Бронювання",
+            "Дата оплати",
+            "ПІБ",
+            "Телефон",
+            "Вік",
+            "Кількість місць",
+            "Інші учасники",
+            "Знижки / Пільги (УБД, Діти)",
+            "Нотатка / Побажання",
+            "Сума (грн)",
+            "Підтвердження оплати",
+            "Telegram (@нік)",
+        ]
+
+        ws = None
+        try:
+            ws = sh.worksheet(sheet_title)
+        except gspread.WorksheetNotFound:
+            clean_title_prefix = re.sub(
+                r"[\[\]\*\?\/\\:]", "-", re.sub(r"\s+", " ", tour.title.strip())
+            )[:30].lower()
+            short_date_lower = _extract_short_date(tour.dates).lower()
+            for candidate in sh.worksheets():
+                cand_name = candidate.title.strip().lower()
+                if cand_name in ("розклад", "faq", "промокоди"):
+                    continue
+                if cand_name.startswith(clean_title_prefix) and (
+                    not short_date_lower or short_date_lower in cand_name
+                ):
+                    ws = candidate
+                    try:
+                        if candidate.title != sheet_title:
+                            candidate.update_title(sheet_title)
+                    except Exception:
+                        pass
+                    break
+
+        if ws is not None:
+            existing_headers = ws.row_values(1)
+            if existing_headers != headers:
+                if ws.col_count < len(headers):
+                    ws.add_cols(len(headers) - ws.col_count)
+                ws.update("A1:L1", [headers])
+            return ws
+
+        if not create_if_missing:
+            return None
+
+        ws = sh.add_worksheet(title=sheet_title, rows=100, cols=12)
+        ws.append_row(headers)
+        return ws
+
     async def append_paid_booking(
         self, tour: TourEntity, booking: BookingEntity
     ) -> None:
         def _sync_append():
             sh = self._get_spreadsheet()
-            sheet_title = _sanitize_sheet_title(tour.title, tour.dates)
-
-            headers = [
-                "ID Бронювання",
-                "Дата оплати",
-                "ПІБ",
-                "Телефон",
-                "Вік",
-                "Кількість місць",
-                "Інші учасники",
-                "Знижки / Пільги (УБД, Діти)",
-                "Нотатка / Побажання",
-                "Сума (грн)",
-                "ID транзакції LiqPay",
-                "Telegram (@нік)",
-            ]
-
-            try:
-                ws = sh.worksheet(sheet_title)
-                existing_headers = ws.row_values(1)
-                if existing_headers != headers:
-                    if ws.col_count < len(headers):
-                        ws.add_cols(len(headers) - ws.col_count)
-                    ws.update("A1:L1", [headers])
-            except gspread.WorksheetNotFound:
-                ws = sh.add_worksheet(title=sheet_title, rows=100, cols=12)
-                ws.append_row(headers)
+            ws = self._find_or_create_tour_worksheet(sh, tour, create_if_missing=True)
 
             tg_nick = f"@{booking.username}" if booking.username else "прихований"
             ws.append_row(
@@ -189,16 +228,56 @@ class GoogleSheetsService:
                     booking.id,
                     datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M"),
                     _sanitize_cell(booking.full_name),
-                    f"'{booking.phone}",
+                    _sanitize_cell(booking.phone),
                     booking.age,
                     booking.tickets_count,
                     _sanitize_cell(booking.other_participants),
                     _sanitize_cell(booking.discount_info),
                     _sanitize_cell(booking.notes),
                     booking.amount,
-                    _sanitize_cell(booking.transaction_id or ""),
+                    _sanitize_cell(booking.transaction_id or "🌹"),
                     _sanitize_cell(tg_nick),
-                ]
+                ],
+                value_input_option="RAW",
             )
 
         await asyncio.to_thread(_sync_append)
+
+    async def update_booking_payment_mark(
+        self, tour: TourEntity, booking: BookingEntity, mark: str
+    ) -> None:
+        def _sync_update_mark():
+            sh = self._get_spreadsheet()
+            ws = self._find_or_create_tour_worksheet(sh, tour, create_if_missing=True)
+            id_col = ws.col_values(1)
+            target_row = None
+            for idx, val in enumerate(id_col, start=1):
+                if idx == 1:
+                    continue
+                if str(val).strip() == str(booking.id):
+                    target_row = idx
+                    break
+
+            if target_row is not None:
+                ws.update_cell(target_row, 11, mark)
+            else:
+                tg_nick = f"@{booking.username}" if booking.username else "прихований"
+                ws.append_row(
+                    [
+                        booking.id,
+                        datetime.now(KYIV_TZ).strftime("%d.%m.%Y %H:%M"),
+                        _sanitize_cell(booking.full_name),
+                        _sanitize_cell(booking.phone),
+                        booking.age,
+                        booking.tickets_count,
+                        _sanitize_cell(booking.other_participants),
+                        _sanitize_cell(booking.discount_info),
+                        _sanitize_cell(booking.notes),
+                        booking.amount,
+                        mark,
+                        _sanitize_cell(tg_nick),
+                    ],
+                    value_input_option="RAW",
+                )
+
+        await asyncio.to_thread(_sync_update_mark)

@@ -11,6 +11,7 @@ class BookingForm(StatesGroup):
     waiting_for_promo_code = State()
     waiting_for_notes = State()
     waiting_for_terms_agreement = State()
+    waiting_for_receipt = State()
 
 
 class LoyalRequestForm(StatesGroup):

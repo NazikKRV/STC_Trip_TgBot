@@ -44,6 +44,9 @@ class IBookingRepository(Protocol):
         self, tour_id: int, include_pending: bool = True
     ) -> int: ...
     async def get_user_confirmed_bookings_count(self, user_telegram_id: int) -> int: ...
+    async def get_latest_pending_by_user(
+        self, user_telegram_id: int
+    ) -> BookingEntity | None: ...
 
 
 class IUserRepository(Protocol):
