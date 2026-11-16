@@ -81,44 +81,10 @@ class TourService:
             return f"🚨 Поспішайте! Залишилось всього {real_left} місць!"
 
     async def seed_defaults_if_empty(self) -> None:
-        tours = await self._tour_repo.get_active_tours()
-        if not tours:
-            demo_tour = TourEntity(
-                id=None,
-                title="НЕЙМОВІРНА БОРЖАВА 🏔🍁",
-                dates="11 жовтня (07:00-22:30)",
-                price=1200,
-                program_url="https://telegra.ph/CHORNICHNA-BORZHAVA-POH%D0%86D-HREBTOM-z-STC-07-24",
-                included_details=(
-                    "✅ Проїзд автобусом євро-класу (аудіо, кондиціонер)\n"
-                    "✅ Супровід тімлідера стк;\n"
-                    "✅ Екскурсійне обслуговування протягом туру;\n"
-                    "✅ Фото-звіт;\n"
-                    "✅ Розіграш призів."
-                ),
-                payment_deadline="сьогодні 22:00",
-                chat_link="https://t.me/+example_borzhava_chat",
-                max_seats=59,
-                duration_days=1,
-                is_active=True,
-            )
-            await self._tour_repo.create_seed_tour(demo_tour)
-
         if self._faq_repo:
             existing_faqs = await self._faq_repo.get_all()
             if len(existing_faqs) < len(DEFAULT_FAQS):
                 await self._faq_repo.sync_faqs(DEFAULT_FAQS)
-
-        if self._promo_repo:
-            existing_promo = await self._promo_repo.get_active_by_code("OLDFRIEND")
-            if not existing_promo:
-                await self._promo_repo.upsert_promo(
-                    PromoCodeEntity(
-                        code="OLDFRIEND",
-                        discount_per_person=50,
-                        is_active=True,
-                    )
-                )
 
 
 class BookingService:

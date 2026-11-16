@@ -134,12 +134,7 @@ class GoogleSheetsService:
                 ws = sh.worksheet("Промокоди")
             except gspread.WorksheetNotFound:
                 ws = sh.add_worksheet(title="Промокоди", rows=50, cols=2)
-                ws.append_rows(
-                    [
-                        ["Промокод", "Знижка з особи (грн)"],
-                        ["OLDFRIEND", 50],
-                    ]
-                )
+                ws.append_row(["Промокод", "Знижка з особи (грн)"])
 
             records = ws.get_all_records()
             promos = []
