@@ -152,13 +152,37 @@ class BookingService:
     ) -> PromoCodeEntity | None:
         if not self._promo_repo:
             return None
-        return await self._promo_repo.upsert_promo(
+        norm_code = code.strip().upper()
+        promo = await self._promo_repo.upsert_promo(
             PromoCodeEntity(
-                code=code.strip().upper(),
+                code=norm_code,
                 discount_per_person=discount_per_person,
                 is_active=True,
             )
         )
+        if self._sheets_service:
+            try:
+                await self._sheets_service.upsert_promo_in_sheet(
+                    norm_code, discount_per_person
+                )
+            except Exception:
+                logger.exception("Не вдалося записати промокод %s у Google Таблицю", norm_code)
+        return promo
+
+    async def delete_promo_code(self, code: str) -> bool:
+        norm_code = code.strip().upper()
+        deleted_db = False
+        if self._promo_repo:
+            deleted_db = await self._promo_repo.deactivate_promo(norm_code)
+        deleted_sheet = False
+        if self._sheets_service:
+            try:
+                deleted_sheet = await self._sheets_service.delete_promo_from_sheet(
+                    norm_code
+                )
+            except Exception:
+                logger.exception("Не вдалося видалити промокод %s із Google Таблиці", norm_code)
+        return deleted_db or deleted_sheet
 
     def calculate_discount(
         self,

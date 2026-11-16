@@ -153,6 +153,45 @@ class GoogleSheetsService:
 
         return await asyncio.to_thread(_sync_promos)
 
+    async def upsert_promo_in_sheet(self, code: str, discount_per_person: int) -> None:
+        def _sync_upsert_promo():
+            sh = self._get_spreadsheet()
+            try:
+                ws = sh.worksheet("Промокоди")
+            except gspread.WorksheetNotFound:
+                ws = sh.add_worksheet(title="Промокоди", rows=50, cols=2)
+                ws.append_row(["Промокод", "Знижка з особи (грн)"])
+
+            norm_code = code.strip().upper()
+            col_codes = ws.col_values(1)
+            for idx, val in enumerate(col_codes, start=1):
+                if idx == 1:
+                    continue
+                if str(val).strip().upper() == norm_code:
+                    ws.update_cell(idx, 2, discount_per_person)
+                    return
+            ws.append_row([norm_code, discount_per_person], value_input_option="RAW")
+
+        await asyncio.to_thread(_sync_upsert_promo)
+
+    async def delete_promo_from_sheet(self, code: str) -> bool:
+        def _sync_del_promo():
+            sh = self._get_spreadsheet()
+            try:
+                ws = sh.worksheet("Промокоди")
+            except gspread.WorksheetNotFound:
+                return False
+
+            norm_code = code.strip().upper()
+            col_codes = ws.col_values(1)
+            for idx in range(len(col_codes), 1, -1):
+                if str(col_codes[idx - 1]).strip().upper() == norm_code:
+                    ws.delete_rows(idx)
+                    return True
+            return False
+
+        return await asyncio.to_thread(_sync_del_promo)
+
     def _find_or_create_tour_worksheet(
         self, sh: gspread.Spreadsheet, tour: TourEntity, create_if_missing: bool = True
     ) -> gspread.Worksheet | None:

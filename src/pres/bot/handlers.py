@@ -183,7 +183,8 @@ async def show_admin_panel(
     tours = await tour_service.list_available_tours()
     text = (
         "⚙️ <b>Панель управління STC TRIPS (Група менеджерів)</b>\n\n"
-        "• Команда <code>/add_promo КОД СУМА</code> — швидко створити промокод (напр. <code>/add_promo SUMMER 100</code>)\n"
+        "• Команда <code>/add_promo КОД СУМА</code> — додати промокод у базу й таблицю (напр. <code>/add_promo SUMMER 100</code>)\n"
+        "• Команда <code>/del_promo КОД</code> — видалити промокод із бази й таблиці (напр. <code>/del_promo SUMMER</code>)\n"
         "• Оберіть тур нижче для перегляду списку учасників або розсилки чату:"
     )
     await message.answer(
@@ -204,10 +205,10 @@ async def cmd_add_promo(message: Message, booking_service: BookingService):
         return
 
     parts = (message.text or "").split()
-    if len(parts) < 3 or not parts[2].isdigit():
+    if len(parts) < 3 or not parts[2].isdigit() or int(parts[2]) <= 0:
         await message.answer(
             "Використання: <code>/add_promo КОД СУМА_З_ОСОБИ</code>\n"
-            "Приклад: <code>/add_promo OLDFRIEND 50</code>",
+            "Приклад: <code>/add_promo SUMMER 100</code>",
             parse_mode="HTML",
         )
         return
@@ -216,9 +217,37 @@ async def cmd_add_promo(message: Message, booking_service: BookingService):
     discount = int(parts[2])
     await booking_service.upsert_promo_code(code, discount)
     await message.answer(
-        f"✅ Промокод <code>{html.escape(code)}</code> на знижку <b>-{discount} грн/ос</b> успішно збережено!",
+        f"✅ Промокод <code>{html.escape(code)}</code> на знижку <b>-{discount} грн/ос</b> збережено і в базу, і у вкладку «Промокоди» Google Таблиці!",
         parse_mode="HTML",
     )
+
+
+@router.message(Command("del_promo"), StateFilter("*"))
+async def cmd_del_promo(message: Message, booking_service: BookingService):
+    if not is_managers_chat(message.chat.id):
+        return
+
+    parts = (message.text or "").split()
+    if len(parts) < 2:
+        await message.answer(
+            "Використання: <code>/del_promo КОД</code>\n"
+            "Приклад: <code>/del_promo SUMMER</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    code = parts[1].strip().upper()
+    deleted = await booking_service.delete_promo_code(code)
+    if deleted:
+        await message.answer(
+            f"🗑 Промокод <code>{html.escape(code)}</code> вимкнено та видалено з Google Таблиці!",
+            parse_mode="HTML",
+        )
+    else:
+        await message.answer(
+            f"ℹ️ Промокод <code>{html.escape(code)}</code> не знайдено.",
+            parse_mode="HTML",
+        )
 
 
 @router.callback_query(F.data == "admin:main")

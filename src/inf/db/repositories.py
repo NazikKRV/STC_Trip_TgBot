@@ -397,6 +397,15 @@ class PostgresPromoCodeRepository:
         await self._session.refresh(model)
         return self._to_entity(model)
 
+    async def deactivate_promo(self, code: str) -> bool:
+        normalized = code.strip().upper()
+        model = await self._session.get(PromoCodeModel, normalized)
+        if not model:
+            return False
+        model.is_active = False
+        await self._session.commit()
+        return True
+
     async def sync_promos(self, promos: list[PromoCodeEntity]) -> int:
         await self._session.execute(update(PromoCodeModel).values(is_active=False))
         count = 0
